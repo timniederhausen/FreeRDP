@@ -393,8 +393,7 @@ void SdlRail::enableRemoteAppMode(bool enable)
 	_enabled = enable;
 }
 
-bool SdlRail::paint(SDL_Surface* primary, SDL_PixelFormat fallbackFormat,
-                    const std::vector<SDL_Rect>& damage)
+bool SdlRail::paint(SDL_Surface* primary, SDL_PixelFormat fallbackFormat, const REGION16* damage)
 {
 	if (!_enabled)
 		return true;

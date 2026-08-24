@@ -181,7 +181,7 @@ void SdlRailWindow::adoptLocalGeometry(const SDL_Rect& rect)
 	_needsFullBlit = true;
 	/* Repaint real content (clear placeholder). */
 	if (_hasGfx)
-		_gfxDamage.assign(1, SDL_Rect{ 0, 0, static_cast<int>(_gfxW), static_cast<int>(_gfxH) });
+		setFullDamage(_gfxW, _gfxH);
 }
 
 SDL_Rect SdlRailWindow::windowRect() const
@@ -832,7 +832,7 @@ void SdlRailWindow::updateGfxSurface(const void* data, uint32_t stride, uint32_t
 			         static_cast<uint32_t>(_id));
 		_gfxBuffer.clear();
 		_hasGfx = false;
-		_gfxDamage.clear();
+		region16_clear(&_gfxDamage.data);
 		_gfxStride = stride;
 		_gfxW = width;
 		_gfxH = height;
@@ -851,7 +851,7 @@ void SdlRailWindow::updateGfxSurface(const void* data, uint32_t stride, uint32_t
 		if (!_hasGfx && regionIsBlank(src, stride, bounds))
 			return;
 		_gfxBuffer.assign(src, src + bytes);
-		_gfxDamage.assign(1, SDL_Rect{ 0, 0, static_cast<int>(width), static_cast<int>(height) });
+		setFullDamage(width, height);
 		_needsFullBlit = true;
 		/* Blend real alpha, force opaque otherwise. */
 		_gfxHasAlpha = honorsAlpha() &&
@@ -861,10 +861,10 @@ void SdlRailWindow::updateGfxSurface(const void* data, uint32_t stride, uint32_t
 	else
 	{
 		const SDL_Rect bounds{ 0, 0, static_cast<int>(width), static_cast<int>(height) };
+		bool collapse = false;
 		for (uint32_t i = 0; i < nbDamage; i++)
 		{
-			const SDL_Rect r{ damage[i].left, damage[i].top, damage[i].right - damage[i].left,
-				              damage[i].bottom - damage[i].top };
+			const SDL_Rect r = sdl::utils::toSDLRect(damage[i]);
 			SDL_Rect clip{};
 			if (!SDL_GetRectIntersection(&r, &bounds, &clip))
 				continue;
@@ -874,15 +874,16 @@ void SdlRailWindow::updateGfxSurface(const void* data, uint32_t stride, uint32_t
 			    static_cast<UINT32>(clip.h), src, PIXEL_FORMAT_BGRA32, stride,
 			    static_cast<UINT32>(clip.x), static_cast<UINT32>(clip.y), nullptr,
 			    FREERDP_FLIP_NONE);
-			_gfxDamage.push_back(clip);
+			/* Out of memory: collapse to a full repaint below. */
+			if (!sdl::utils::applyRegionUnion(_gfxDamage.data, clip))
+				collapse = true;
 			/* Alpha may first appear in a later incremental frame (e.g. a menu fading in). */
 			if (honorsAlpha() && !_gfxHasAlpha && regionHasAlpha(_gfxBuffer.data(), stride, clip))
 				_gfxHasAlpha = true;
 		}
 		/* A hidden window accumulates rects without ever painting; collapse to one full repaint. */
-		if (_gfxDamage.size() > 32)
-			_gfxDamage.assign(1,
-			                  SDL_Rect{ 0, 0, static_cast<int>(width), static_cast<int>(height) });
+		if (collapse || (region16_n_rects(&_gfxDamage.data) > 32))
+			setFullDamage(width, height);
 	}
 	if ((_gfxW != width) || (_gfxH != height))
 	{
@@ -905,7 +906,16 @@ void SdlRailWindow::invalidateAll()
 	std::unique_lock lock(_gfxLock);
 	_needsFullBlit = true;
 	if (_hasGfx)
-		_gfxDamage.assign(1, SDL_Rect{ 0, 0, static_cast<int>(_gfxW), static_cast<int>(_gfxH) });
+		setFullDamage(_gfxW, _gfxH);
+}
+
+void SdlRailWindow::setFullDamage(uint32_t w, uint32_t h)
+{
+	region16_clear(&_gfxDamage.data);
+	/* Out of memory: the full re-blit path repaints without the region. */
+	if (!sdl::utils::applyRegionUnion(_gfxDamage.data,
+	                                  { 0, 0, static_cast<int>(w), static_cast<int>(h) }))
+		_needsFullBlit = true;
 }
 
 void SdlRailWindow::setServerState(StateSync& s, bool m)
@@ -971,8 +981,7 @@ bool SdlRailWindow::effectivelyMaximized() const
 }
 
 bool SdlRailWindow::paint(SDL_Surface* primary, SDL_PixelFormat fallbackFormat,
-                          const std::vector<SDL_Rect>& damage, SDL_Window* parent,
-                          const SDL_Rect& parentRect)
+                          const REGION16* damage, SDL_Window* parent, const SDL_Rect& parentRect)
 {
 	if (!reconcile(parent, parentRect))
 		return false;
@@ -1069,7 +1078,8 @@ bool SdlRailWindow::paintGfx(SDL_PixelFormat format)
 	    !_localMoveActive && !awaitingServerResize && (winResized || gfxResized || _needsFullBlit);
 
 	/* Skip undamaged frames. */
-	if (!localResize && !serverResize && _gfxDamage.empty() && !(_layered && _visDirty))
+	if (!localResize && !serverResize && region16_is_empty(&_gfxDamage.data) &&
+	    !(_layered && _visDirty))
 	{
 		WLog_VRB(TAG, "paintGfx skip id=0x%08" PRIx32 " no-damage no-resize",
 		         static_cast<uint32_t>(_id));
@@ -1096,7 +1106,7 @@ bool SdlRailWindow::paintGfx(SDL_PixelFormat format)
 		if (uniform)
 		{
 			/* Disarm repaint triggers while popup surface remains blank. */
-			_gfxDamage.clear();
+			region16_clear(&_gfxDamage.data);
 			_needsFullBlit = false;
 			_lastWinW = ww;
 			_lastWinH = wh;
@@ -1137,13 +1147,12 @@ bool SdlRailWindow::paintGfx(SDL_PixelFormat format)
 		const bool showDashes = _localMoveActive && _localMoveIsResize;
 		/* Only fill revealed area during resize, not move drag. */
 		const bool fillRevealed = showDashes || awaitingServerResize;
-		std::ignore =
-		    _win->paintResizeFrame(s, off, !_gfxDamage.empty(), bi, fillRevealed, showDashes);
+		std::ignore = _win->paintResizeFrame(s, off, !region16_is_empty(&_gfxDamage.data), bi,
+		                                     fillRevealed, showDashes);
 	}
 	else
 	{
 		/* Render accumulated damage or re-blit full surface on bare resize. */
-		const SDL_Rect full = { 0, 0, gw, gh };
 		const SDL_Point dst = blitOffset();
 		const bool maxed = effectivelyMaximized();
 		if (_layered && !_visRects.empty() && !maxed)
@@ -1155,9 +1164,9 @@ bool SdlRailWindow::paintGfx(SDL_PixelFormat format)
 			{
 				/* Wipe so newly-excluded regions don't keep stale pixels. */
 				std::ignore = _win->fill(static_cast<Uint8>(0), 0, 0, 0);
-				_gfxDamage.assign(1, full);
 				_visDirty = false;
 				_needsFullBlit = false;
+				setFullDamage(_gfxW, _gfxH);
 			}
 			const SDL_Point off = { _visOffsetSet ? (_visOffset.x - _windowRect.x) : 0,
 				                    _visOffsetSet ? (_visOffset.y - _windowRect.y) : 0 };
@@ -1168,24 +1177,22 @@ bool SdlRailWindow::paintGfx(SDL_PixelFormat format)
 				         static_cast<uint32_t>(_id), off.x, off.y, _visRects.size(),
 				         _visRects.at(0).w, _visRects.at(0).h, _visRects.at(0).x, _visRects.at(0).y,
 				         ww, wh, _gfxW, _gfxH);
-			const std::vector<SDL_Rect>& damageRects = _gfxDamage;
-			std::vector<SDL_Rect> draw;
-			draw.reserve(damageRects.size() * _visRects.size());
-			for (const auto& d : damageRects)
+			UINT32 nDamage = 0;
+			const RECTANGLE_16* damageRects = region16_rects(&_gfxDamage.data, &nDamage);
+			for (UINT32 i = 0; i < nDamage; i++)
 			{
+				const SDL_Rect d = sdl::utils::toSDLRect(damageRects[i]);
 				for (auto v : _visRects)
 				{
 					v.x += off.x;
 					v.y += off.y;
 					SDL_Rect part{};
 					if (SDL_GetRectIntersection(&d, &v, &part))
-						draw.push_back(part);
+						std::ignore = _win->drawRect(s, dst, part);
 				}
 			}
-			if (!draw.empty()) /* empty vector would mean "draw everything" to drawRects */
-				std::ignore = _win->drawRects(s, dst, draw);
 		}
-		else if (_gfxDamage.empty() || serverResize)
+		else if (region16_is_empty(&_gfxDamage.data) || serverResize)
 		{
 			/* Clear target and redraw surface on size change. */
 			if (serverResize)
@@ -1197,22 +1204,22 @@ bool SdlRailWindow::paintGfx(SDL_PixelFormat format)
 				                         static_cast<Uint8>(transparentWin ? 0x00 : 0xFF));
 				_needsFullBlit = false;
 			}
-			std::ignore = _win->drawRects(s, dst, { full });
+			std::ignore = _win->drawRects(s, dst, nullptr); /* the whole surface */
 		}
 		else
 		{
-			std::ignore = _win->drawRects(s, dst, _gfxDamage);
+			std::ignore = _win->drawRects(s, dst, &_gfxDamage.data);
 		}
 
 		_win->updateSurface();
 		_gfxPresented = true; /* First frame rendered; paint() may map the window. */
 	}
 	SDL_DestroySurface(s);
-	WLog_VRB(TAG, "paintGfx id=0x%08" PRIx32 " mode=%s win=%dx%d dmg=%zu",
+	WLog_VRB(TAG, "paintGfx id=0x%08" PRIx32 " mode=%s win=%dx%d dmg=%d",
 	         static_cast<uint32_t>(_id),
 	         localResize ? "resize" : (serverResize ? "server-resize" : "gfx"), ww, wh,
-	         _gfxDamage.size());
-	_gfxDamage.clear();
+	         region16_n_rects(&_gfxDamage.data));
+	region16_clear(&_gfxDamage.data);
 	/* Preserve size baseline during local resize. */
 	if (!localResize)
 	{
@@ -1224,7 +1231,7 @@ bool SdlRailWindow::paintGfx(SDL_PixelFormat format)
 	return true;
 }
 
-bool SdlRailWindow::paintLegacy(SDL_Surface* primary, const std::vector<SDL_Rect>& damage)
+bool SdlRailWindow::paintLegacy(SDL_Surface* primary, const REGION16* damage)
 {
 	SDL_Rect rect{};
 	SDL_Rect bi{};
@@ -1238,7 +1245,7 @@ bool SdlRailWindow::paintLegacy(SDL_Surface* primary, const std::vector<SDL_Rect
 
 		/* Damage-driven: re-copy only server-updated regions, keep the last frame elsewhere. */
 		full = !_painted;
-		if (!full && damage.empty())
+		if (!full && (!damage || region16_is_empty(damage)))
 		{
 			WLog_VRB(TAG, "paintLegacy skip id=0x%08" PRIx32 " no-damage",
 			         static_cast<uint32_t>(_id));
@@ -1252,6 +1259,9 @@ bool SdlRailWindow::paintLegacy(SDL_Surface* primary, const std::vector<SDL_Rect
 
 	if (vis.empty())
 		vis.push_back({ 0, 0, rect.w, rect.h });
+
+	UINT32 nDamage = 0;
+	const RECTANGLE_16* damageRects = region16_rects(damage, &nDamage);
 
 	/* Paint only the visible sub-rects (stacked windows don't bleed through), clamped and 1:1. */
 	const SDL_Rect bounds = { 0, 0, primary->w, primary->h };
@@ -1271,8 +1281,9 @@ bool SdlRailWindow::paintLegacy(SDL_Surface* primary, const std::vector<SDL_Rect
 				blitted = true;
 			continue;
 		}
-		for (const auto& d : damage)
+		for (UINT32 i = 0; i < nDamage; i++)
 		{
+			const SDL_Rect d = sdl::utils::toSDLRect(damageRects[i]);
 			SDL_Rect part{};
 			if (!SDL_GetRectIntersection(&clipped, &d, &part))
 				continue;

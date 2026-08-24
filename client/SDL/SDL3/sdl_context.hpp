@@ -24,7 +24,6 @@
 #include <sstream>
 #include <vector>
 #include <mutex>
-#include <queue>
 #include <thread>
 #include <atomic>
 
@@ -34,6 +33,7 @@
 
 #include <sdl_common_utils.hpp>
 
+#include "sdl_utils.hpp"
 #include "sdl_window.hpp"
 #include "sdl_disp.hpp"
 #include "sdl_clip.hpp"
@@ -96,8 +96,8 @@ class SdlContext
 	[[nodiscard]] const std::vector<SDL_DisplayID>& monitorIds() const;
 	[[nodiscard]] int64_t monitorId(uint32_t index) const;
 
-	void push(std::vector<SDL_Rect>&& rects);
-	[[nodiscard]] std::vector<SDL_Rect> pop();
+	[[nodiscard]] bool push(const GDI_RGN* regions, INT32 nregions);
+	void pop(REGION16& out);
 
 	void setHasCursor(bool val);
 	[[nodiscard]] bool hasCursor() const;
@@ -112,8 +112,8 @@ class SdlContext
 	[[nodiscard]] bool updateWindowList();
 	[[nodiscard]] bool updateWindow(SDL_WindowID id);
 
-	[[nodiscard]] bool drawToWindows(const std::vector<SDL_Rect>& rects = {});
-	[[nodiscard]] bool drawToWindow(SdlWindow& window, const std::vector<SDL_Rect>& rects = {});
+	[[nodiscard]] bool drawToWindows(const REGION16* dirty_region = nullptr);
+	[[nodiscard]] bool drawToWindow(SdlWindow& window, const REGION16* dirty_region = nullptr);
 	[[nodiscard]] bool minimizeAllWindows();
 	[[nodiscard]] int exitCode() const;
 	[[nodiscard]] SDL_PixelFormat pixelFormat() const;
@@ -217,7 +217,7 @@ class SdlContext
 	CursorType _cursorType = CURSOR_NULL;
 	std::vector<SDL_DisplayID> _monitorIds;
 	std::mutex _queue_mux;
-	std::queue<std::vector<SDL_Rect>> _queue;
+	scoped_region16 _dirty_region;
 	/* SDL */
 	bool _fullscreen = false;
 	bool _resizeable = false;

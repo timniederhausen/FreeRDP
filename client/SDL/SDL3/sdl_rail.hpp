@@ -62,9 +62,8 @@ class SdlRail
 	}
 
 	/* Paint all RAIL windows (window-mapped GFX surface, or legacy desktop region).
-	 * `damage` = server-updated desktop rects for this cycle (empty = nothing new). */
-	bool paint(SDL_Surface* primary, SDL_PixelFormat fallbackFormat,
-	           const std::vector<SDL_Rect>& damage);
+	 * `damage` = server-updated desktop region for this cycle (nullptr or empty = nothing new). */
+	bool paint(SDL_Surface* primary, SDL_PixelFormat fallbackFormat, const REGION16* damage);
 
 	/* Called from the GFX pipeline when a window-mapped surface updated (RDP thread). */
 	UINT updateWindowFromSurface(gdiGfxSurface* surface);

@@ -29,6 +29,8 @@
 
 #include <freerdp/types.h>
 
+#include "sdl_utils.hpp"
+
 class SdlWindow;
 
 /* A decoded RAIL window icon (BGRA32 pixels). */
@@ -207,9 +209,10 @@ class SdlRailWindow
 
 	/* Create/move/show the local SDL window to match pending state; popups use parent+rect. */
 	bool reconcile(SDL_Window* parent, const SDL_Rect& parentRect);
-	/* Render: GFX surface if mapped, else the shared desktop region. `damage` = updated rects. */
-	bool paint(SDL_Surface* primary, SDL_PixelFormat fallbackFormat,
-	           const std::vector<SDL_Rect>& damage, SDL_Window* parent, const SDL_Rect& parentRect);
+	/* Render: GFX surface if mapped, else the shared desktop region. `damage` = updated desktop
+	 * region (nullptr or empty = nothing new); GFX windows use their own _gfxDamage. */
+	bool paint(SDL_Surface* primary, SDL_PixelFormat fallbackFormat, const REGION16* damage,
+	           SDL_Window* parent, const SDL_Rect& parentRect);
 
   private:
 	/* One maximize/minimize state pair: local (sent to server), server-reported, pending apply. */
@@ -246,7 +249,9 @@ class SdlRailWindow
 	[[nodiscard]] SDL_Rect targetOuterRect() const; /* caller holds _gfxLock */
 	bool create(SDL_Window* parent, const SDL_Rect& parentRect);
 	bool paintGfx(SDL_PixelFormat format);
-	bool paintLegacy(SDL_Surface* primary, const std::vector<SDL_Rect>& damage);
+	bool paintLegacy(SDL_Surface* primary, const REGION16* damage);
+	/* Mark the whole w x h surface damaged. Caller holds _gfxLock. */
+	void setFullDamage(uint32_t w, uint32_t h);
 
 	uint64_t _id;
 	std::unique_ptr<SdlWindow> _win; /* local window+renderer (lazy, main thread) */
@@ -329,7 +334,7 @@ class SdlRailWindow
 	/* Popup surface has real per-pixel alpha (blend); all-zero undefined alpha stays opaque. */
 	bool _gfxHasAlpha = false;
 	/* Regions changed since last paint. Guarded by _gfxLock. */
-	std::vector<SDL_Rect> _gfxDamage;
+	scoped_region16 _gfxDamage;
 	/* Pixel dimensions at last presentation. */
 	int _lastWinW = 0;
 	int _lastWinH = 0;

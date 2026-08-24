@@ -23,6 +23,7 @@
 #include <winpr/wlog.h>
 
 #include <freerdp/settings.h>
+#include <freerdp/codec/region.h>
 
 #include <SDL3/SDL.h>
 #include <string>
@@ -33,6 +34,25 @@
 #include <sdl_common_utils.hpp>
 
 template <typename T> using deleted_unique_ptr = std::unique_ptr<T, std::function<void(T*)>>;
+
+struct scoped_region16
+{
+	scoped_region16()
+	{
+		region16_init(&data);
+	}
+	scoped_region16(const scoped_region16& other) = delete;
+	scoped_region16(scoped_region16&& other) = delete;
+	~scoped_region16()
+	{
+		region16_uninit(&data);
+	}
+
+	scoped_region16& operator=(const scoped_region16& other) = delete;
+	scoped_region16& operator=(scoped_region16&& other) = delete;
+
+	REGION16 data{};
+};
 
 enum
 {
@@ -89,6 +109,11 @@ namespace sdl::utils
 	[[nodiscard]] std::string toString(Uint32 type);
 	[[nodiscard]] std::string toString(SDL_Rect rect);
 	[[nodiscard]] std::string toString(SDL_FRect rect);
+
+	[[nodiscard]] SDL_Rect toSDLRect(const RECTANGLE_16& rect);
+	/* Add `rect` to `region`, clamped to the RECTANGLE_16 range; empty rects are skipped.
+	 * Returns false on allocation failure, `region` may then have been emptied. */
+	[[nodiscard]] bool applyRegionUnion(REGION16& region, const SDL_Rect& rect);
 
 	[[nodiscard]] UINT32 orientaion_to_rdp(SDL_DisplayOrientation orientation);
 

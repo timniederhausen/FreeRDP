@@ -17,7 +17,9 @@
  * limitations under the License.
  */
 
+#include <algorithm>
 #include <cassert>
+#include <cstdint>
 #include <sstream>
 #include <iomanip>
 #include <random>
@@ -522,6 +524,25 @@ namespace sdl::utils
 		std::stringstream ss;
 		ss << "SDL_Rect{" << rect.x << "x" << rect.y << "-" << rect.w << "x" << rect.h << "}";
 		return ss.str();
+	}
+
+	SDL_Rect toSDLRect(const RECTANGLE_16& rect)
+	{
+		return { rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top };
+	}
+
+	bool applyRegionUnion(REGION16& region, const SDL_Rect& rect)
+	{
+		/* RECTANGLE_16 is unsigned: clamp instead of letting negative coordinates wrap */
+		const auto clamp = [](int64_t v)
+		{ return static_cast<UINT16>(std::clamp<int64_t>(v, 0, UINT16_MAX)); };
+
+		const RECTANGLE_16 r = { clamp(rect.x), clamp(rect.y), clamp(int64_t{ rect.x } + rect.w),
+			                     clamp(int64_t{ rect.y } + rect.h) };
+		/* region16_union_rect would add an empty rect as-is */
+		if (rectangle_is_empty(&r))
+			return true;
+		return region16_union_rect(&region, &region, &r);
 	}
 
 } // namespace sdl::utils
