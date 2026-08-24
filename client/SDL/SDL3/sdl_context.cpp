@@ -66,6 +66,8 @@ SdlContext::SdlContext(rdpContext* context)
 
 	/* Push a null element used as abort when iterating the array */
 	_args.push_back({ nullptr, 0, nullptr, nullptr, nullptr, -1, nullptr, nullptr });
+
+	region16_init(&_dirty_region);
 }
 
 void SdlContext::setHasCursor(bool val)
@@ -543,19 +545,12 @@ BOOL SdlContext::endPaint(rdpContext* context)
 		return TRUE;
 
 	const INT32 ninvalid = hwnd->ninvalid;
-	const GDI_RGN* cinvalid = hwnd->cinvalid;
-
 	if (ninvalid < 1)
 		return TRUE;
 
-	std::vector<SDL_Rect> rects;
-	for (INT32 x = 0; x < ninvalid; x++)
-	{
-		auto& rgn = cinvalid[x];
-		rects.push_back({ rgn.x, rgn.y, rgn.w, rgn.h });
-	}
-
-	sdl->push(std::move(rects));
+	sdl->push(hwnd->cinvalid, ninvalid);
+	hwnd->invalid->null = TRUE;
+	hwnd->ninvalid = 0;
 	return sdl_push_user_event(SDL_EVENT_USER_UPDATE);
 }
 
@@ -905,7 +900,7 @@ void SdlContext::updateMonitorDataFromOffsets()
 	}
 }
 
-bool SdlContext::drawToWindow(SdlWindow& window, const std::vector<SDL_Rect>& rects)
+bool SdlContext::drawToWindow(SdlWindow& window, const REGION16* dirty_region)
 {
 	if (!isConnected())
 		return true;
@@ -933,7 +928,7 @@ bool SdlContext::drawToWindow(SdlWindow& window, const std::vector<SDL_Rect>& re
 
 		_localScale = { static_cast<float>(size.w) / static_cast<float>(gdi->width),
 			            static_cast<float>(size.h) / static_cast<float>(gdi->height) };
-		if (!window.drawScaledRects(surface, _localScale, rects))
+		if (!window.drawScaledRects(surface, _localScale, dirty_region))
 			return false;
 	}
 	else
@@ -941,7 +936,7 @@ bool SdlContext::drawToWindow(SdlWindow& window, const std::vector<SDL_Rect>& re
 		SDL_Point offset{ 0, 0 };
 		if (freerdp_settings_get_bool(context()->settings, FreeRDP_UseMultimon))
 			offset = { window.offsetX(), window.offsetY() };
-		if (!window.drawRects(surface, offset, rects))
+		if (!window.drawRects(surface, offset, dirty_region))
 			return false;
 	}
 
@@ -1641,7 +1636,7 @@ bool SdlContext::useLocalScale() const
 	return !dynResize && !fs && !multimon;
 }
 
-bool SdlContext::drawToWindows(const std::vector<SDL_Rect>& rects)
+bool SdlContext::drawToWindows(const REGION16* dirty_region)
 {
 	/* RAIL damage is per-window (_gfxDamage), not in the rects queue: repaint every tick. */
 	if (_rail.enabled())
@@ -1733,8 +1728,6 @@ BOOL SdlContext::beginPaint(rdpContext* context)
 
 	HGDI_WND hwnd = hdc->hwnd;
 	WINPR_ASSERT(hwnd->invalid);
-	hwnd->invalid->null = TRUE;
-	hwnd->ninvalid = 0;
 
 	return TRUE;
 }
@@ -1860,22 +1853,26 @@ int64_t SdlContext::monitorId(uint32_t index) const
 	return _monitorIds.at(index);
 }
 
-void SdlContext::push(std::vector<SDL_Rect>&& rects)
+void SdlContext::push(const GDI_RGN* cinvalid, int ninvalid)
 {
 	std::unique_lock lock(_queue_mux);
-	_queue.emplace(std::move(rects));
+	for (INT32 x = 0; x < ninvalid; x++)
+	{
+		auto& rgn = cinvalid[x];
+		RECTANGLE_16 rect;
+		rect.left = rgn.x;
+		rect.top = rgn.y;
+		rect.right = rgn.x + rgn.w;
+		rect.bottom = rgn.y + rgn.h;
+		region16_union_rect(&_dirty_region, &_dirty_region, &rect);
+	}
 }
 
-std::vector<SDL_Rect> SdlContext::pop()
+void SdlContext::pop(REGION16& out)
 {
 	std::unique_lock lock(_queue_mux);
-	if (_queue.empty())
-	{
-		return {};
-	}
-	auto val = std::move(_queue.front());
-	_queue.pop();
-	return val;
+	region16_copy(&out, &_dirty_region);
+	region16_clear(&_dirty_region);
 }
 
 bool SdlContext::setFullscreen(bool enter, bool forceOriginalDisplay)

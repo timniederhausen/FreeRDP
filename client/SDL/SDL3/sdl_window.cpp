@@ -322,15 +322,18 @@ bool SdlWindow::drawRect(SDL_Surface* surface, SDL_Point offset, const SDL_Rect&
 	return blit(surface, srcRect, dstRect);
 }
 
-bool SdlWindow::drawRects(SDL_Surface* surface, SDL_Point offset,
-                          const std::vector<SDL_Rect>& rects)
+bool SdlWindow::drawRects(SDL_Surface* surface, SDL_Point offset, const REGION16* rects)
 {
-	if (rects.empty())
+	if (!rects || 0 == region16_n_rects(rects))
 	{
 		return drawRect(surface, offset, { 0, 0, surface->w, surface->h });
 	}
-	for (auto& srcRect : rects)
+	UINT32 num_rects;
+	const auto r = region16_rects(rects, &num_rects);
+	for (int i = 0; i < num_rects; ++i)
 	{
+		const SDL_Rect srcRect{ r[i].left, r[i].top, r[i].right - r[i].left,
+			                    r[i].bottom - r[i].top };
 		if (!drawRect(surface, offset, srcRect))
 			return false;
 	}
@@ -355,14 +358,18 @@ bool SdlWindow::drawScaledRect(SDL_Surface* surface, const SDL_FPoint& scale,
 }
 
 bool SdlWindow::drawScaledRects(SDL_Surface* surface, const SDL_FPoint& scale,
-                                const std::vector<SDL_Rect>& rects)
+                                const REGION16* rects)
 {
-	if (rects.empty())
+	if (!rects || 0 == region16_n_rects(rects))
 	{
 		return drawScaledRect(surface, scale, { 0, 0, surface->w, surface->h });
 	}
-	for (const auto& srcRect : rects)
+	UINT32 num_rects;
+	const auto r = region16_rects(rects, &num_rects);
+	for (int i = 0; i < num_rects; ++i)
 	{
+		const SDL_Rect srcRect{ r[i].left, r[i].top, r[i].right - r[i].left,
+			                    r[i].bottom - r[i].top };
 		if (!drawScaledRect(surface, scale, srcRect))
 			return false;
 	}

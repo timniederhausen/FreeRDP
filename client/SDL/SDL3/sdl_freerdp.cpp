@@ -234,13 +234,11 @@ static void sdl_term_handler([[maybe_unused]] int signum, [[maybe_unused]] const
 					break;
 					case SDL_EVENT_USER_UPDATE:
 					{
-						std::vector<SDL_Rect> rectangles;
-						do
-						{
-							rectangles = sdl->pop();
-							if (!sdl->drawToWindows(rectangles))
-								throw ErrorMsg{ -1, windowEvent.type, "sdl->drawToWindows" };
-						} while (!rectangles.empty());
+						scoped_region16 dirty_region;
+						sdl->pop(dirty_region.data);
+
+						if (!sdl->drawToWindows(&dirty_region.data))
+							throw ErrorMsg{ -1, 0, "sdl->drawToWindows" };
 					}
 					break;
 					case SDL_EVENT_USER_CREATE_WINDOWS:
