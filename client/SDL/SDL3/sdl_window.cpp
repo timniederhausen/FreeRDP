@@ -331,16 +331,18 @@ bool SdlWindow::drawRect(SDL_Surface* surface, SDL_Point offset, const SDL_Rect&
 	return blit(surface, srcRect, dstRect);
 }
 
-bool SdlWindow::drawRects(SDL_Surface* surface, SDL_Point offset,
-                          const std::vector<SDL_Rect>& rects)
+bool SdlWindow::drawRects(SDL_Surface* surface, SDL_Point offset, const REGION16* rects)
 {
-	if (rects.empty())
+	WINPR_ASSERT(surface);
+	if (!rects || region16_is_empty(rects))
 	{
 		return drawRect(surface, offset, { 0, 0, surface->w, surface->h });
 	}
-	for (auto& srcRect : rects)
+	UINT32 num_rects = 0;
+	const auto r = region16_rects(rects, &num_rects);
+	for (UINT32 i = 0; i < num_rects; ++i)
 	{
-		if (!drawRect(surface, offset, srcRect))
+		if (!drawRect(surface, offset, sdl::utils::toSDLRect(r[i])))
 			return false;
 	}
 	return true;
@@ -370,24 +372,28 @@ bool SdlWindow::drawScaledRect(SDL_Surface* surface, const SDL_FPoint& scale,
 }
 
 bool SdlWindow::drawScaledRects(SDL_Surface* surface, const SDL_FPoint& scale,
-                                const std::vector<SDL_Rect>& rects)
+                                const REGION16* rects)
 {
-	if (rects.empty())
+	WINPR_ASSERT(surface);
+	if (!rects || region16_is_empty(rects))
 	{
 		return drawScaledRect(surface, scale, { 0, 0, surface->w, surface->h });
 	}
+	UINT32 num_rects = 0;
+	const auto r = region16_rects(rects, &num_rects);
 
 	/* Upload every dirty rect before drawing any of them: scaling filters linearly, so the
 	 * edge of each drawn rect also samples the texels just outside it. Drawn one by one,
 	 * those can be a neighbouring dirty rect that is not uploaded yet, and the old picture
 	 * stays behind as a faint line along the edge until that area changes again. */
-	for (const auto& srcRect : rects)
+	for (UINT32 i = 0; i < num_rects; ++i)
 	{
-		if (!upload(surface, srcRect))
+		if (!upload(surface, sdl::utils::toSDLRect(r[i])))
 			return false;
 	}
-	for (const auto& srcRect : rects)
+	for (UINT32 i = 0; i < num_rects; ++i)
 	{
+		const auto srcRect = sdl::utils::toSDLRect(r[i]);
 		if (!render(srcRect, scaledDstRect(scale, srcRect)))
 			return false;
 	}

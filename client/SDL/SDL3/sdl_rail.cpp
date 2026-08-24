@@ -541,8 +541,7 @@ void SdlRail::noteLogonPrompt()
 		WLog_WARN(TAG, "sdl_push_user_event failed");
 }
 
-bool SdlRail::paint(SDL_Surface* primary, SDL_PixelFormat fallbackFormat,
-                    const std::vector<SDL_Rect>& damage)
+bool SdlRail::paint(SDL_Surface* primary, SDL_PixelFormat fallbackFormat, const REGION16* damage)
 {
 	if (!_enabled)
 		return true;

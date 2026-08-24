@@ -237,15 +237,10 @@ static void sdl_term_handler([[maybe_unused]] int signum, [[maybe_unused]] const
 					break;
 					case SDL_EVENT_USER_UPDATE:
 					{
-						std::vector<SDL_Rect> rectangles;
-						std::vector<SDL_Rect> cur;
-						do
-						{
-							cur = sdl->pop();
-							rectangles.insert(rectangles.end(), cur.begin(), cur.end());
-						} while (!cur.empty());
+						scoped_region16 dirty_region;
+						sdl->pop(dirty_region.data);
 
-						if (!sdl->drawToWindows(rectangles))
+						if (!sdl->drawToWindows(&dirty_region.data))
 							throw ErrorMsg{ -1, windowEvent.type, "sdl->drawToWindows" };
 
 						/* geometry updates come with the session updates, not with the
