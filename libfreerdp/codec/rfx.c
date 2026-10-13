@@ -30,7 +30,9 @@
 #include <winpr/crt.h>
 #include <winpr/tchar.h>
 #include <winpr/sysinfo.h>
+#if !defined(WITHOUT_FREERDP_3x_DEPRECATED)
 #include <winpr/registry.h>
+#endif
 
 #include <freerdp/log.h>
 #include <freerdp/settings.h>
@@ -39,6 +41,8 @@
 #include <freerdp/primitives.h>
 #include <freerdp/codec/region.h>
 #include <freerdp/build-config.h>
+#include <freerdp/utils/helpers.h>
+#include <winpr/config-readers.h>
 
 #include "rfx_constants.h"
 #include "rfx_types.h"
@@ -262,9 +266,12 @@ RFX_CONTEXT* rfx_context_new_ex(BOOL encoder, UINT32 ThreadingFlags)
 		goto fail;
 
 	priv->UseThreads = FALSE;
+
+	const char config[] = "remotefx.json";
 	if (!(ThreadingFlags & THREADING_FLAGS_DISABLE_THREADS))
 		priv->UseThreads = TRUE;
 
+#if !defined(WITHOUT_FREERDP_3x_DEPRECATED)
 	{
 		char* key = freerdp_getApplicatonDetailsRegKey(RFX_KEY);
 		if (key)
@@ -276,6 +283,8 @@ RFX_CONTEXT* rfx_context_new_ex(BOOL encoder, UINT32 ThreadingFlags)
 
 			if (status == ERROR_SUCCESS)
 			{
+				WLog_WARN(TAG, "HKLM.reg is deprecated since 3.33.0. ATTENTION: Use %s instead!",
+				          config);
 				DWORD dwType = 0;
 				DWORD dwValue = 0;
 				DWORD dwSize = sizeof(dwValue);
@@ -286,6 +295,15 @@ RFX_CONTEXT* rfx_context_new_ex(BOOL encoder, UINT32 ThreadingFlags)
 
 				RegCloseKey(hKey);
 			}
+		}
+	}
+#endif
+	{
+		WINPR_JSON* json = freerdp_GetJSONConfigFile(TRUE, config);
+		if (json)
+		{
+			winpr_config_apply_bool(config, json, "UseThreads", &priv->UseThreads);
+			WINPR_JSON_Delete(json);
 		}
 	}
 
@@ -1112,6 +1130,42 @@ static inline BOOL rfx_process_message_tileset(RFX_CONTEXT* WINPR_RESTRICT conte
 	return rc;
 }
 
+WINPR_ATTR_NODISCARD
+static BOOL rect_is_valid(const RFX_RECT* rect, UINT32 left, UINT32 top,
+                          const RECTANGLE_16* clippingRect)
+{
+	WINPR_ASSERT(clippingRect);
+
+	if (!rect)
+	{
+		WLog_ERR(TAG, "rect=NULL");
+		return FALSE;
+	}
+	if (left > UINT16_MAX - 1u * rect->x)
+	{
+		WLog_ERR(TAG, "left(%" PRIu32 ") + rect->x(%d) > %d", left, rect->x, UINT16_MAX);
+		return FALSE;
+	}
+	if (top > UINT16_MAX - 1u * rect->y)
+	{
+		WLog_ERR(TAG, "top(%" PRIu32 ") + rect->y(%d) > %d", top, rect->y, UINT16_MAX);
+		return FALSE;
+	}
+	if (clippingRect->left > UINT16_MAX - rect->width)
+	{
+		WLog_ERR(TAG, "clippingRect->left(%" PRIu32 ") + rect->width(%d) > %d", clippingRect->left,
+		         rect->width, UINT16_MAX);
+		return FALSE;
+	}
+	if (clippingRect->top > UINT16_MAX - rect->height)
+	{
+		WLog_ERR(TAG, "clippingRect->top(%" PRIu32 ") + rect->height(%d) > %d", clippingRect->top,
+		         rect->height, UINT16_MAX);
+		return FALSE;
+	}
+	return TRUE;
+}
+
 BOOL rfx_process_message(RFX_CONTEXT* WINPR_RESTRICT context, const BYTE* WINPR_RESTRICT data,
                          UINT32 length, UINT32 left, UINT32 top, BYTE* WINPR_RESTRICT dst,
                          UINT32 dstFormat, UINT32 dstStride, UINT32 dstHeight,
@@ -1286,10 +1340,12 @@ BOOL rfx_process_message(RFX_CONTEXT* WINPR_RESTRICT context, const BYTE* WINPR_
 			RECTANGLE_16 clippingRect = WINPR_C_ARRAY_INIT;
 			const RFX_RECT* rect = &(message->rects[i]);
 
-			WINPR_ASSERT(left + rect->x <= UINT16_MAX);
-			WINPR_ASSERT(top + rect->y <= UINT16_MAX);
-			WINPR_ASSERT(clippingRect.left + rect->width <= UINT16_MAX);
-			WINPR_ASSERT(clippingRect.top + rect->height <= UINT16_MAX);
+			if (!rect_is_valid(rect, left, top, &clippingRect))
+			{
+				region16_uninit(&updateRegion);
+				region16_uninit(&clippingRects);
+				return FALSE;
+			}
 
 			clippingRect.left = WINPR_ASSERTING_INT_CAST(UINT16, MIN(left + rect->x, dstWidth));
 			clippingRect.top = WINPR_ASSERTING_INT_CAST(UINT16, MIN(top + rect->y, dstHeight));

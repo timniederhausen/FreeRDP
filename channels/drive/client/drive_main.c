@@ -260,11 +260,15 @@ static UINT drive_process_irp_close(DRIVE_DEVICE* drive, IRP* irp)
 		irp->IoStatus = STATUS_UNSUCCESSFUL;
 	else
 	{
-		ListDictionary_Remove(drive->files, key);
-		irp->IoStatus = drive_map_windows_err(GetLastError());
+		/* Free the file here, so that a failing delete on close is reported */
+		DRIVE_FILE* taken = ListDictionary_Take(drive->files, key);
+		if (drive_file_free(taken))
+			irp->IoStatus = STATUS_SUCCESS;
+		else
+			irp->IoStatus = drive_map_windows_err(GetLastError());
 	}
 
-	Stream_Zero(irp->output, 5); /* Padding(5) */
+	Stream_Zero(irp->output, 4); /* Padding(4) */
 
 	return CHANNEL_RC_OK;
 }
@@ -851,7 +855,10 @@ static DWORD WINAPI drive_thread_func(LPVOID arg)
 
 		IRP* irp = (IRP*)message.wParam;
 		if (!drive_poll_run(drive, irp))
+		{
+			error = ERROR_INVALID_DATA;
 			break;
+		}
 	}
 
 fail:

@@ -110,8 +110,6 @@ set(SRCS
     Controllers/BookmarkListController.m
     Controllers/CredentialsEditorController.h
     Controllers/CredentialsEditorController.m
-    Controllers/CredentialsInputController.h
-    Controllers/CredentialsInputController.m
     Controllers/EditorBaseController.h
     Controllers/EditorBaseController.m
     Controllers/EditorSelectionController.h
@@ -126,8 +124,6 @@ set(SRCS
     Controllers/RDPSessionViewController.m
     Controllers/ScreenSelectionController.h
     Controllers/ScreenSelectionController.m
-    Controllers/VerifyCertificateController.h
-    Controllers/VerifyCertificateController.m
     FreeRDP/ios_cliprdr.h
     FreeRDP/ios_cliprdr.m
     FreeRDP/ios_freerdp_events.h
@@ -160,15 +156,8 @@ set(SRCS
     SceneDelegate.m
     Views/AdvancedKeyboardView.h
     Views/AdvancedKeyboardView.m
-    Views/BlockAlertView.h
-    Views/BlockAlertView.m
-    Views/BlockBackground.h
-    Views/BlockBackground.m
-    Views/BlockUI.h
     Views/BookmarkTableCell.h
     Views/BookmarkTableCell.m
-    Views/EditButtonTableViewCell.h
-    Views/EditButtonTableViewCell.m
     Views/EditFlagTableViewCell.h
     Views/EditFlagTableViewCell.m
     Views/EditSecretTextTableViewCell.h
@@ -181,6 +170,10 @@ set(SRCS
     Views/EditTextTableViewCell.m
     Views/RDPCursor.h
     Views/RDPCursor.m
+    Views/RDPKeyboardToolbarView.h
+    Views/RDPKeyboardToolbarView.m
+    Views/RDPOverlayStyle.h
+    Views/RDPOverlayStyle.m
     Views/RDPSessionToolbar.h
     Views/RDPSessionToolbar.m
     Views/RDPSessionView.h
@@ -190,34 +183,11 @@ set(SRCS
 )
 
 # add resources
-set(IOS_CLIENT_RESOURCES_XIBS
-    Resources/BookmarkListView.xib
-    Resources/BookmarkTableViewCell.xib
-    Resources/CredentialsInputView.xib
-    Resources/EditButtonTableViewCell.xib
-    Resources/EditFlagTableViewCell.xib
-    Resources/EditSecretTextTableViewCell.xib
-    Resources/EditSelectionTableViewCell.xib
-    Resources/EditSubEditTableViewCell.xib
-    Resources/EditTextTableViewCell.xib
-    Resources/MainWindow.xib
-    Resources/RDPConnectingView.xib
-    Resources/RDPSessionView.xib
-    Resources/SessionTableViewCell.xib
-    Resources/VerifyCertificateView.xib
+set(IOS_CLIENT_RESOURCES_XIBS Resources/BookmarkListView.xib Resources/MainWindow.xib Resources/RDPConnectingView.xib
+                              Resources/RDPSessionView.xib Resources/SessionTableViewCell.xib
 )
 
 set(IOS_CLIENT_RESOURCES_PNGS
-    Resources/alert-black-button@2x.png
-    Resources/alert-black-button.png
-    Resources/alert-gray-button@2x.png
-    Resources/alert-gray-button.png
-    Resources/alert-red-button@2x.png
-    Resources/alert-red-button.png
-    Resources/alert-window@2x.png
-    Resources/alert-window-landscape@2x.png
-    Resources/alert-window-landscape.png
-    Resources/alert-window.png
     Resources/cancel_button_background.png
     Resources/Default@2x.png
     Resources/Default-568h@2x.png
@@ -229,8 +199,6 @@ set(IOS_CLIENT_RESOURCES_PNGS
     Resources/Icon@2x.png
     Resources/Icon-72@2x.png
     Resources/Icon-72.png
-    Resources/icon_accessory_star_off.png
-    Resources/icon_accessory_star_on.png
     Resources/icon_key_arrow_down.png
     Resources/icon_key_arrow_left.png
     Resources/icon_key_arrow_right.png
@@ -300,6 +268,15 @@ set(EXTRA_LIBS
     ${WEBKIT_FRAMEWORK}
     ${GAMECONTROLLER_FRAMEWORK}
 )
+
+set(IOS_CLIENT_ICON_FILES "")
+foreach(_icon IN LISTS IOS_CLIENT_RESOURCES_PNGS)
+  get_filename_component(_icon_name "${_icon}" NAME)
+  if(_icon_name MATCHES "^Icon")
+    list(APPEND IOS_CLIENT_ICON_FILES "<string>${_icon_name}</string>")
+  endif()
+endforeach()
+list(JOIN IOS_CLIENT_ICON_FILES "\n\t\t" IOS_CLIENT_ICON_FILES)
 
 set(APP_ICON "${FREERDP_SOURCE_DIR}/resources/FreeRDP_OSX.icns")
 set(RESOURCES ${IOS_CLIENT_RESOURCES_XIBS} ${IOS_CLIENT_RESOURCES_PNGS} ${IOS_CLIENT_DIR}/Defaults.plist ${APP_ICON})

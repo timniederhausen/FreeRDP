@@ -1571,6 +1571,11 @@ BOOL freerdp_settings_set_pointer_len(rdpSettings* settings, FreeRDP_Settings_Ke
 			return freerdp_settings_set_pointer_len_(settings, id, FreeRDP_UINT32_UNUSED, data, len,
 			                                         sizeof(TIME_ZONE_INFORMATION));
 		case FreeRDP_BitmapCacheV2CellInfo:
+			if (len > 5)
+			{
+				WLog_ERR(TAG, "FreeRDP_BitmapCacheV2CellInfo::len must be >= 0 and <= 5");
+				return FALSE;
+			}
 			return freerdp_settings_set_pointer_len_(settings, id, FreeRDP_BitmapCacheV2NumCells,
 			                                         data, len, sizeof(BITMAP_CACHE_V2_CELL_INFO));
 		case FreeRDP_GlyphCache:
@@ -4537,6 +4542,32 @@ rdpSettings* freerdp_settings_deserialize(const char* jstr, size_t length)
 		return nullptr;
 	}
 
+	rdpSettings* settings = freerdp_settings_new(0);
+	if (!settings)
+	{
+		WLog_Print(log, WLOG_ERROR, "freerdp_settings_new failed");
+		goto fail;
+	}
+
+	if (!freerdp_settings_apply_from_json(settings, json))
+		goto fail;
+
+	WINPR_JSON_Delete(json);
+	return settings;
+
+fail:
+	freerdp_settings_free(settings);
+	WINPR_JSON_Delete(json);
+	return nullptr;
+}
+
+BOOL freerdp_settings_apply_from_json(rdpSettings* settings, WINPR_JSON* json)
+{
+	wLog* log = WLog_Get(TAG);
+
+	WINPR_ASSERT(settings);
+	WINPR_ASSERT(json);
+
 	WINPR_JSON* jbool = WINPR_JSON_GetObjectItemCaseSensitive(
 	    json, freerdp_settings_get_type_name_for_type(RDP_SETTINGS_TYPE_BOOL));
 	WINPR_JSON* juint16 = WINPR_JSON_GetObjectItemCaseSensitive(
@@ -4556,12 +4587,6 @@ rdpSettings* freerdp_settings_deserialize(const char* jstr, size_t length)
 	WINPR_JSON* jpointer = WINPR_JSON_GetObjectItemCaseSensitive(
 	    json, freerdp_settings_get_type_name_for_type(RDP_SETTINGS_TYPE_POINTER));
 
-	rdpSettings* settings = freerdp_settings_new(0);
-	if (!settings)
-	{
-		WLog_Print(log, WLOG_ERROR, "freerdp_settings_new failed");
-		goto fail;
-	}
 	if (!jbool || !juint16 || !jint16 || !juint32 || !jint32 || !juint64 || !jint64 || !jstring ||
 	    !jpointer)
 		goto fail;
@@ -4656,13 +4681,10 @@ rdpSettings* freerdp_settings_deserialize(const char* jstr, size_t length)
 		}
 	}
 
-	WINPR_JSON_Delete(json);
-	return settings;
+	return TRUE;
 
 fail:
-	freerdp_settings_free(settings);
-	WINPR_JSON_Delete(json);
-	return nullptr;
+	return FALSE;
 }
 
 const ADDIN_ARGV* freerdp_device_get_args(const RDPDR_DEVICE* device)

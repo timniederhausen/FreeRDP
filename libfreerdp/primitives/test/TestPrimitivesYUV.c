@@ -1140,6 +1140,62 @@ fail:
 	return rc;
 }
 
+/* Check I444ToRGB_8u converts every pixel on its own (no AVC444 chroma
+ * filter is reversed) and does not write past the end of a line.
+ */
+static BOOL compare_i444_to_rgb(prim_size_t roi, DWORD type)
+{
+	BOOL rc = FALSE;
+	const UINT32 format = PIXEL_FORMAT_BGRX32;
+	BYTE* yuv[3] = WINPR_C_ARRAY_INIT;
+	const UINT32 yuvStep[3] = { roi.width, roi.width, roi.width };
+	const size_t padding = 64;
+	const size_t stride = 4ULL * roi.width + padding;
+
+	primitives_t* prims = primitives_get_by_type(type);
+	if (!prims)
+	{
+		printf("primitives type %" PRIu32 " not supported, skipping\n", type);
+		return TRUE;
+	}
+
+	BYTE* expected = calloc(roi.height, stride);
+	BYTE* rgb = calloc(roi.height, stride);
+	if (!expected || !rgb || !prims->I444ToRGB_8u)
+		goto fail;
+	if (!allocate_yuv(yuv, roi))
+		goto fail;
+
+	memset(expected, PADDING_FILL_VALUE, roi.height * stride);
+	memset(rgb, PADDING_FILL_VALUE, roi.height * stride);
+
+	const BYTE* cyuv[] = { yuv[0], yuv[1], yuv[2] };
+	if (!yuv444_to_rgb(expected, stride, cyuv, yuvStep, roi))
+		goto fail;
+	if (prims->I444ToRGB_8u(cyuv, yuvStep, rgb, stride, format, &roi) != PRIMITIVES_SUCCESS)
+		goto fail;
+
+	for (size_t y = 0; y < roi.height; y++)
+	{
+		if (memcmp(&expected[y * stride], &rgb[y * stride], stride) != 0)
+		{
+			(void)fprintf(stderr, "[%s] [%" PRIu32 "x%" PRIu32 "] mismatch in line %" PRIuz "\n",
+			              __func__, roi.width, roi.height, y);
+			goto fail;
+		}
+	}
+
+	rc = TRUE;
+fail:
+	printf("%s [%" PRIu32 "x%" PRIu32 "] finished with %s\n", __func__, roi.width, roi.height,
+	       rc ? "SUCCESS" : "FAILURE");
+	free_yuv(yuv);
+	free(expected);
+	free(rgb);
+
+	return rc;
+}
+
 /* Check the result of generic matches the optimized routine.
  *
  */
@@ -1423,6 +1479,109 @@ fail:
 	return rc;
 }
 
+/* Check the result of generic matches the optimized routine for the AVC444
+ * combine: a luma (main) view followed by a v1 or v2 chroma (auxiliary) view,
+ * on random data. Constant input planes cannot tell a misplaced column from a
+ * correct one. */
+static BOOL compare_yuv420_combine_to_yuv444(prim_size_t roi, DWORD type, avc444_frame_type chroma)
+{
+	BOOL rc = FALSE;
+	/* Even sizes only: for an odd height the generic and SSE v1 paths still
+	 * disagree on the last row (nHeight / 2 against (nHeight + 1) / 2). */
+	roi.width = MAX(roi.width & ~1u, 2u);
+	roi.height = MAX(roi.height & ~1u, 2u);
+	const UINT32 awidth = (roi.width + 31) & ~31u;
+	const UINT32 aheight = (roi.height + 15) & ~15u;
+	const UINT32 srcStep[3] = { awidth, awidth / 2, awidth / 2 };
+	const UINT32 dstStep[3] = { awidth, awidth, awidth };
+	const RECTANGLE_16 rect = { 0, 0, WINPR_ASSERTING_INT_CAST(UINT16, roi.width),
+		                        WINPR_ASSERTING_INT_CAST(UINT16, roi.height) };
+	BYTE* luma[3] = WINPR_C_ARRAY_INIT;
+	BYTE* aux[3] = WINPR_C_ARRAY_INIT;
+	BYTE* dst1[3] = WINPR_C_ARRAY_INIT;
+	BYTE* dst2[3] = WINPR_C_ARRAY_INIT;
+
+	primitives_t* prims = primitives_get_by_type(type);
+	if (!prims)
+	{
+		printf("primitives type %" PRIu32 " not supported, skipping\n", type);
+		return TRUE;
+	}
+
+	primitives_t* soft = primitives_get_by_type(PRIMITIVES_PURE_SOFT);
+	if (!soft)
+		goto fail;
+
+	for (size_t x = 0; x < 3; x++)
+	{
+		const size_t srcSize = 1ULL * srcStep[x] * ((x > 0) ? aheight / 2 : aheight);
+		luma[x] = calloc(srcSize, 1);
+		aux[x] = calloc(srcSize, 1);
+		dst1[x] = calloc(dstStep[x], aheight);
+		dst2[x] = calloc(dstStep[x], aheight);
+		if (!luma[x] || !aux[x] || !dst1[x] || !dst2[x])
+			goto fail;
+		if (winpr_RAND(luma[x], srcSize) < 0)
+			goto fail;
+		if (winpr_RAND(aux[x], srcSize) < 0)
+			goto fail;
+	}
+
+	{
+		const BYTE* cluma[] = { luma[0], luma[1], luma[2] };
+		const BYTE* caux[] = { aux[0], aux[1], aux[2] };
+
+		if (soft->YUV420CombineToYUV444(AVC444_LUMA, cluma, srcStep, awidth, aheight, dst1, dstStep,
+		                                &rect) != PRIMITIVES_SUCCESS)
+			goto fail;
+		if (soft->YUV420CombineToYUV444(chroma, caux, srcStep, awidth, aheight, dst1, dstStep,
+		                                &rect) != PRIMITIVES_SUCCESS)
+			goto fail;
+		if (prims->YUV420CombineToYUV444(AVC444_LUMA, cluma, srcStep, awidth, aheight, dst2,
+		                                 dstStep, &rect) != PRIMITIVES_SUCCESS)
+			goto fail;
+		if (prims->YUV420CombineToYUV444(chroma, caux, srcStep, awidth, aheight, dst2, dstStep,
+		                                 &rect) != PRIMITIVES_SUCCESS)
+			goto fail;
+	}
+
+	for (size_t x = 0; x < 3; x++)
+	{
+		for (size_t y = 0; y < roi.height; y++)
+		{
+			const BYTE* line1 = &dst1[x][y * dstStep[x]];
+			const BYTE* line2 = &dst2[x][y * dstStep[x]];
+
+			for (size_t z = 0; z < roi.width; z++)
+			{
+				if (line1[z] != line2[z])
+				{
+					(void)fprintf(
+					    stderr,
+					    "[%s] plane %" PRIuz " [%" PRIuz "x%" PRIuz
+					    "] generic and optimized data mismatch: 0x%02" PRIx8 " != 0x%02" PRIx8 "\n",
+					    (chroma == AVC444_CHROMAv1) ? "v1" : "v2", x, z, y, line1[z], line2[z]);
+					(void)fprintf(stderr, "roi: %" PRIu32 "x%" PRIu32 "\n", roi.width, roi.height);
+					goto fail;
+				}
+			}
+		}
+	}
+
+	rc = TRUE;
+fail:
+	printf("%s [%s] finished with %s\n", __func__, (chroma == AVC444_CHROMAv1) ? "v1" : "v2",
+	       rc ? "SUCCESS" : "FAILURE");
+	for (size_t x = 0; x < 3; x++)
+	{
+		free(luma[x]);
+		free(aux[x]);
+		free(dst1[x]);
+		free(dst2[x]);
+	}
+	return rc;
+}
+
 int TestPrimitivesYUV(int argc, char* argv[])
 {
 	BOOL large = (argc > 1);
@@ -1465,6 +1624,11 @@ int TestPrimitivesYUV(int argc, char* argv[])
 	{
 		if (!compare_yuv444_to_rgb(roi, type))
 			goto end;
+
+		const prim_size_t oddroi = { roi.width - 1, roi.height };
+		if (!compare_i444_to_rgb(roi, type) || !compare_i444_to_rgb(oddroi, type))
+			goto end;
+
 		if (!compare_rgb_to_yuv444(roi, type))
 			goto end;
 
@@ -1472,6 +1636,17 @@ int TestPrimitivesYUV(int argc, char* argv[])
 			goto end;
 		if (!compare_rgb_to_yuv420(roi, type))
 			goto end;
+
+		/* the random roi may be too narrow for the vector loops; 1744 is an
+		 * odd number of macroblocks */
+		const prim_size_t combineRois[] = { roi, { 1744, 64 } };
+		for (size_t x = 0; x < ARRAYSIZE(combineRois); x++)
+		{
+			if (!compare_yuv420_combine_to_yuv444(combineRois[x], type, AVC444_CHROMAv1))
+				goto end;
+			if (!compare_yuv420_combine_to_yuv444(combineRois[x], type, AVC444_CHROMAv2))
+				goto end;
+		}
 	}
 
 	if (!run_tests(roi))

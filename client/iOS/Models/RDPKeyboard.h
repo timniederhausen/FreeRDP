@@ -32,6 +32,7 @@
 	BOOL _alt_pressed;
 	BOOL _shift_pressed;
 	BOOL _win_pressed;
+	BOOL _altgr_pressed;
 }
 
 @property(assign) id<RDPKeyboardDelegate> delegate;
@@ -39,6 +40,7 @@
 @property(readonly) BOOL altPressed;
 @property(readonly) BOOL shiftPressed;
 @property(readonly) BOOL winPressed;
+@property(readonly) BOOL altGrPressed;
 
 // returns a keyboard instance
 + (RDPKeyboard *)getSharedRDPKeyboard;
@@ -50,13 +52,14 @@
 - (void)reset;
 
 // sends the given unicode character to the server
-- (void)sendUnicode:(int)character;
+- (void)sendUnicode:(NSInteger)character;
 
-// send a key stroke event using the given virtual key code
-- (void)sendVirtualKeyCode:(int)keyCode;
+// send a key stroke event using the given virtual key code, then release any modifier
+// keys that were toggled on (they apply to a single key stroke)
+- (void)sendVirtualKeyCode:(NSInteger)keyCode;
 
 // send a single key down or up event for the given virtual key code
-- (void)sendVirtualKey:(int)vKey up:(BOOL)up;
+- (void)sendVirtualKey:(NSInteger)vKey up:(BOOL)up;
 
 // toggle ctrl key, returns true if pressed, otherwise false
 - (void)toggleCtrlKey;
@@ -70,9 +73,14 @@
 // toggle windows key, returns true if pressed, otherwise false
 - (void)toggleWinKey;
 
+// toggle alt gr (right alt) key
+- (void)toggleAltGrKey;
+
 // send key strokes
 - (void)sendEnterKeyStroke;
 - (void)sendEscapeKeyStroke;
 - (void)sendBackspaceKeyStroke;
+- (void)sendDeleteKeyStroke;
+- (void)sendTabKeyStroke;
 
 @end

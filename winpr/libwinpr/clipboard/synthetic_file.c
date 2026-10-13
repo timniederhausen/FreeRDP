@@ -194,11 +194,11 @@ static WCHAR* concat_file_name(const WCHAR* dir, const WCHAR* file)
 	return buffer;
 }
 
-static BOOL add_file_to_list(wClipboard* clipboard, const WCHAR* local_name,
+static BOOL add_file_to_list(wClipboard* clipboard, size_t recursionDepth, const WCHAR* local_name,
                              const WCHAR* remote_name, wArrayList* files);
 
-static BOOL add_directory_entry_to_list(wClipboard* clipboard, const WCHAR* local_dir_name,
-                                        const WCHAR* remote_dir_name,
+static BOOL add_directory_entry_to_list(wClipboard* clipboard, size_t recursionDepth,
+                                        const WCHAR* local_dir_name, const WCHAR* remote_dir_name,
                                         const LPWIN32_FIND_DATAW pFileData, wArrayList* files)
 {
 	BOOL result = FALSE;
@@ -231,7 +231,7 @@ static BOOL add_directory_entry_to_list(wClipboard* clipboard, const WCHAR* loca
 	remote_name = concat_file_name(remote_dir_name, remote_base_name);
 
 	if (local_name && remote_name)
-		result = add_file_to_list(clipboard, local_name, remote_name, files);
+		result = add_file_to_list(clipboard, recursionDepth, local_name, remote_name, files);
 
 	free(remote_base_name);
 	free(remote_name);
@@ -239,9 +239,9 @@ static BOOL add_directory_entry_to_list(wClipboard* clipboard, const WCHAR* loca
 	return result;
 }
 
-static BOOL do_add_directory_contents_to_list(wClipboard* clipboard, const WCHAR* local_name,
-                                              const WCHAR* remote_name, WCHAR* namebuf,
-                                              wArrayList* files)
+static BOOL do_add_directory_contents_to_list(wClipboard* clipboard, size_t recursionDepth,
+                                              const WCHAR* local_name, const WCHAR* remote_name,
+                                              WCHAR* namebuf, wArrayList* files)
 {
 	WINPR_ASSERT(clipboard);
 	WINPR_ASSERT(local_name);
@@ -258,7 +258,8 @@ static BOOL do_add_directory_contents_to_list(wClipboard* clipboard, const WCHAR
 	}
 	while (TRUE)
 	{
-		if (!add_directory_entry_to_list(clipboard, local_name, remote_name, &FindData, files))
+		if (!add_directory_entry_to_list(clipboard, recursionDepth, local_name, remote_name,
+		                                 &FindData, files))
 		{
 			FindClose(hFind);
 			return FALSE;
@@ -278,8 +279,9 @@ static BOOL do_add_directory_contents_to_list(wClipboard* clipboard, const WCHAR
 	return TRUE;
 }
 
-static BOOL add_directory_contents_to_list(wClipboard* clipboard, const WCHAR* local_name,
-                                           const WCHAR* remote_name, wArrayList* files)
+static BOOL add_directory_contents_to_list(wClipboard* clipboard, size_t recursionDepth,
+                                           const WCHAR* local_name, const WCHAR* remote_name,
+                                           wArrayList* files)
 {
 	BOOL result = FALSE;
 	union
@@ -296,6 +298,16 @@ static BOOL add_directory_contents_to_list(wClipboard* clipboard, const WCHAR* l
 	WINPR_ASSERT(remote_name);
 	WINPR_ASSERT(files);
 
+	const size_t max = CLIPBOARD_FILE_MAX_RECURSION;
+	if (recursionDepth > max)
+	{
+		WLog_ERR(TAG,
+		         "This build only supports recursionDepth=%" PRIuz
+		         " <= CLIPBOARD_FILE_MAX_RECURSION=%" PRIuz " recursion depth for folders copied.",
+		         recursionDepth, max);
+		return FALSE;
+	}
+
 	size_t len = _wcslen(local_name);
 	WCHAR* namebuf = calloc(len + wildcardLen, sizeof(WCHAR));
 	if (!namebuf)
@@ -304,14 +316,15 @@ static BOOL add_directory_contents_to_list(wClipboard* clipboard, const WCHAR* l
 	_wcsncat(namebuf, local_name, len);
 	_wcsncat(namebuf, wildcard.w, wildcardLen);
 
-	result = do_add_directory_contents_to_list(clipboard, local_name, remote_name, namebuf, files);
+	result = do_add_directory_contents_to_list(clipboard, recursionDepth, local_name, remote_name,
+	                                           namebuf, files);
 
 	free(namebuf);
 	return result;
 }
 
-static BOOL add_file_to_list(wClipboard* clipboard, const WCHAR* local_name,
-                             const WCHAR* remote_name, wArrayList* files)
+BOOL add_file_to_list(wClipboard* clipboard, size_t recursionDepth, const WCHAR* local_name,
+                      const WCHAR* remote_name, wArrayList* files)
 {
 	struct synthetic_file* file = nullptr;
 
@@ -337,7 +350,8 @@ static BOOL add_file_to_list(wClipboard* clipboard, const WCHAR* local_name,
 		 * This is effectively a recursive call, but we do not track
 		 * recursion depth, thus filesystem loops can cause a crash.
 		 */
-		if (!add_directory_contents_to_list(clipboard, local_name, remote_name, files))
+		if (!add_directory_contents_to_list(clipboard, recursionDepth + 1, local_name, remote_name,
+		                                    files))
 			return FALSE;
 	}
 
@@ -382,7 +396,7 @@ static BOOL process_file_name(wClipboard* clipboard, const WCHAR* local_name, wA
 	if (!remote_name)
 		return FALSE;
 
-	result = add_file_to_list(clipboard, local_name, remote_name, files);
+	result = add_file_to_list(clipboard, 0, local_name, remote_name, files);
 	free(remote_name);
 	return result;
 }
@@ -563,12 +577,27 @@ static void* convert_any_uri_list_to_filedescriptors(wClipboard* clipboard,
 static void* convert_uri_list_to_filedescriptors(wClipboard* clipboard, UINT32 formatId,
                                                  const void* data, UINT32* pSize)
 {
-	const UINT32 expected = ClipboardGetFormatId(clipboard, mime_uri_list);
-	if (formatId != expected)
+	if (formatId != ClipboardGetFormatId(clipboard, mime_FileGroupDescriptorW))
+	{
+		WLog_ERR(TAG,
+		         "Unuspported destination format %s [0x%04" PRIx32
+		         "], trying to convert from %s [0x%04" PRIx32 "]",
+		         ClipboardGetFormatName(clipboard, formatId), formatId,
+		         ClipboardGetFormatName(clipboard, clipboard->formatId), clipboard->formatId);
 		return nullptr;
+	}
+	if (clipboard->formatId != ClipboardGetFormatId(clipboard, mime_uri_list))
+	{
+		WLog_ERR(TAG,
+		         "Unuspported destination format %s [0x%04" PRIx32
+		         "], trying to convert from %s [0x%04" PRIx32 "]",
+		         ClipboardGetFormatName(clipboard, formatId), formatId,
+		         ClipboardGetFormatName(clipboard, clipboard->formatId), clipboard->formatId);
+		return nullptr;
+	}
 	if (!process_uri_list(clipboard, (const char*)data, *pSize))
 		return nullptr;
-	return convert_any_uri_list_to_filedescriptors(clipboard, formatId, pSize);
+	return convert_any_uri_list_to_filedescriptors(clipboard, clipboard->formatId, pSize);
 }
 
 static BOOL process_files(wClipboard* clipboard, const char* data, UINT32 pSize, const char* prefix)
@@ -630,20 +659,50 @@ static BOOL process_mate_copied_files(wClipboard* clipboard, const char* data, U
 static void* convert_gnome_copied_files_to_filedescriptors(wClipboard* clipboard, UINT32 formatId,
                                                            const void* data, UINT32* pSize)
 {
-	const UINT32 expected = ClipboardGetFormatId(clipboard, mime_gnome_copied_files);
-	if (formatId != expected)
+	if (formatId != ClipboardGetFormatId(clipboard, mime_FileGroupDescriptorW))
+	{
+		WLog_ERR(TAG,
+		         "Unuspported destination format %s [0x%04" PRIx32
+		         "], trying to convert from %s [0x%04" PRIx32 "]",
+		         ClipboardGetFormatName(clipboard, formatId), formatId,
+		         ClipboardGetFormatName(clipboard, clipboard->formatId), clipboard->formatId);
 		return nullptr;
+	}
+	if (clipboard->formatId != ClipboardGetFormatId(clipboard, mime_gnome_copied_files))
+	{
+		WLog_ERR(TAG,
+		         "Unuspported destination format %s [0x%04" PRIx32
+		         "], trying to convert from %s [0x%04" PRIx32 "]",
+		         ClipboardGetFormatName(clipboard, formatId), formatId,
+		         ClipboardGetFormatName(clipboard, clipboard->formatId), clipboard->formatId);
+		return nullptr;
+	}
 	if (!process_gnome_copied_files(clipboard, (const char*)data, *pSize))
 		return nullptr;
-	return convert_any_uri_list_to_filedescriptors(clipboard, formatId, pSize);
+	return convert_any_uri_list_to_filedescriptors(clipboard, clipboard->formatId, pSize);
 }
 
 static void* convert_mate_copied_files_to_filedescriptors(wClipboard* clipboard, UINT32 formatId,
                                                           const void* data, UINT32* pSize)
 {
-	const UINT32 expected = ClipboardGetFormatId(clipboard, mime_mate_copied_files);
-	if (formatId != expected)
+	if (formatId != ClipboardGetFormatId(clipboard, mime_FileGroupDescriptorW))
+	{
+		WLog_ERR(TAG,
+		         "Unuspported destination format %s [0x%04" PRIx32
+		         "], trying to convert from %s [0x%04" PRIx32 "]",
+		         ClipboardGetFormatName(clipboard, formatId), formatId,
+		         ClipboardGetFormatName(clipboard, clipboard->formatId), clipboard->formatId);
 		return nullptr;
+	}
+	if (clipboard->formatId != ClipboardGetFormatId(clipboard, mime_mate_copied_files))
+	{
+		WLog_ERR(TAG,
+		         "Unuspported destination format %s [0x%04" PRIx32
+		         "], trying to convert from %s [0x%04" PRIx32 "]",
+		         ClipboardGetFormatName(clipboard, formatId), formatId,
+		         ClipboardGetFormatName(clipboard, clipboard->formatId), clipboard->formatId);
+		return nullptr;
+	}
 
 	if (!process_mate_copied_files(clipboard, (const char*)data, *pSize))
 		return nullptr;
@@ -871,6 +930,24 @@ WINPR_ATTR_MALLOC(free, 1)
 static void* convert_filedescriptors_to_uri_list(wClipboard* clipboard, UINT32 formatId,
                                                  const void* data, UINT32* pSize)
 {
+	if (formatId != ClipboardGetFormatId(clipboard, mime_uri_list))
+	{
+		WLog_ERR(TAG,
+		         "Unuspported destination format %s [0x%04" PRIx32
+		         "], trying to convert from %s [0x%04" PRIx32 "]",
+		         ClipboardGetFormatName(clipboard, formatId), formatId,
+		         ClipboardGetFormatName(clipboard, clipboard->formatId), clipboard->formatId);
+		return nullptr;
+	}
+	if (clipboard->formatId != ClipboardGetFormatId(clipboard, mime_FileGroupDescriptorW))
+	{
+		WLog_ERR(TAG,
+		         "Unuspported destination format %s [0x%04" PRIx32
+		         "], trying to convert from %s [0x%04" PRIx32 "]",
+		         ClipboardGetFormatName(clipboard, formatId), formatId,
+		         ClipboardGetFormatName(clipboard, clipboard->formatId), clipboard->formatId);
+		return nullptr;
+	}
 	return convert_filedescriptors_to_file_list(clipboard, formatId, data, pSize, "", "file://",
 	                                            "\r\n", FALSE);
 }
@@ -880,6 +957,24 @@ WINPR_ATTR_MALLOC(free, 1)
 static void* convert_filedescriptors_to_gnome_copied_files(wClipboard* clipboard, UINT32 formatId,
                                                            const void* data, UINT32* pSize)
 {
+	if (formatId != ClipboardGetFormatId(clipboard, mime_gnome_copied_files))
+	{
+		WLog_ERR(TAG,
+		         "Unuspported destination format %s [0x%04" PRIx32
+		         "], trying to convert from %s [0x%04" PRIx32 "]",
+		         ClipboardGetFormatName(clipboard, formatId), formatId,
+		         ClipboardGetFormatName(clipboard, clipboard->formatId), clipboard->formatId);
+		return nullptr;
+	}
+	if (clipboard->formatId != ClipboardGetFormatId(clipboard, mime_FileGroupDescriptorW))
+	{
+		WLog_ERR(TAG,
+		         "Unuspported destination format %s [0x%04" PRIx32
+		         "], trying to convert from %s [0x%04" PRIx32 "]",
+		         ClipboardGetFormatName(clipboard, formatId), formatId,
+		         ClipboardGetFormatName(clipboard, clipboard->formatId), clipboard->formatId);
+		return nullptr;
+	}
 	return convert_filedescriptors_to_file_list(clipboard, formatId, data, pSize, "copy\n",
 	                                            "file://", "\n", TRUE);
 }
@@ -888,7 +983,24 @@ WINPR_ATTR_MALLOC(free, 1)
 static void* convert_filedescriptors_to_mate_copied_files(wClipboard* clipboard, UINT32 formatId,
                                                           const void* data, UINT32* pSize)
 {
-
+	if (formatId != ClipboardGetFormatId(clipboard, mime_mate_copied_files))
+	{
+		WLog_ERR(TAG,
+		         "Unuspported destination format %s [0x%04" PRIx32
+		         "], trying to convert from %s [0x%04" PRIx32 "]",
+		         ClipboardGetFormatName(clipboard, formatId), formatId,
+		         ClipboardGetFormatName(clipboard, clipboard->formatId), clipboard->formatId);
+		return nullptr;
+	}
+	if (clipboard->formatId != ClipboardGetFormatId(clipboard, mime_FileGroupDescriptorW))
+	{
+		WLog_ERR(TAG,
+		         "Unuspported destination format %s [0x%04" PRIx32
+		         "], trying to convert from %s [0x%04" PRIx32 "]",
+		         ClipboardGetFormatName(clipboard, formatId), formatId,
+		         ClipboardGetFormatName(clipboard, clipboard->formatId), clipboard->formatId);
+		return nullptr;
+	}
 	char* pDstData = convert_filedescriptors_to_file_list(clipboard, formatId, data, pSize,
 	                                                      "copy\n", "file://", "\n", TRUE);
 	if (!pDstData)
@@ -956,28 +1068,28 @@ static BOOL register_file_formats_and_synthesizers(wClipboard* clipboard)
 	obj = ArrayList_Object(clipboard->localFiles);
 	obj->fnObjectFree = array_free_synthetic_file;
 
-	if (!ClipboardRegisterSynthesizer(clipboard, local_file_format_id, file_group_format_id,
-	                                  convert_uri_list_to_filedescriptors))
+	if (!ClipboardRegisterSynthesizerEx(clipboard, local_file_format_id, file_group_format_id,
+	                                    convert_uri_list_to_filedescriptors))
 		goto error_free_local_files;
 
-	if (!ClipboardRegisterSynthesizer(clipboard, file_group_format_id, local_file_format_id,
-	                                  convert_filedescriptors_to_uri_list))
+	if (!ClipboardRegisterSynthesizerEx(clipboard, file_group_format_id, local_file_format_id,
+	                                    convert_filedescriptors_to_uri_list))
 		goto error_free_local_files;
 
-	if (!ClipboardRegisterSynthesizer(clipboard, local_gnome_file_format_id, file_group_format_id,
-	                                  convert_gnome_copied_files_to_filedescriptors))
+	if (!ClipboardRegisterSynthesizerEx(clipboard, local_gnome_file_format_id, file_group_format_id,
+	                                    convert_gnome_copied_files_to_filedescriptors))
 		goto error_free_local_files;
 
-	if (!ClipboardRegisterSynthesizer(clipboard, file_group_format_id, local_gnome_file_format_id,
-	                                  convert_filedescriptors_to_gnome_copied_files))
+	if (!ClipboardRegisterSynthesizerEx(clipboard, file_group_format_id, local_gnome_file_format_id,
+	                                    convert_filedescriptors_to_gnome_copied_files))
 		goto error_free_local_files;
 
-	if (!ClipboardRegisterSynthesizer(clipboard, local_mate_file_format_id, file_group_format_id,
-	                                  convert_mate_copied_files_to_filedescriptors))
+	if (!ClipboardRegisterSynthesizerEx(clipboard, local_mate_file_format_id, file_group_format_id,
+	                                    convert_mate_copied_files_to_filedescriptors))
 		goto error_free_local_files;
 
-	if (!ClipboardRegisterSynthesizer(clipboard, file_group_format_id, local_mate_file_format_id,
-	                                  convert_filedescriptors_to_mate_copied_files))
+	if (!ClipboardRegisterSynthesizerEx(clipboard, file_group_format_id, local_mate_file_format_id,
+	                                    convert_filedescriptors_to_mate_copied_files))
 		goto error_free_local_files;
 
 	return TRUE;

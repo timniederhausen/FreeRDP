@@ -407,17 +407,15 @@ static const LIBUSB_ENDPOINT_DESCEIPTOR* func_get_ep_desc(LIBUSB_CONFIG_DESCRIPT
 
 static void LIBUSB_CALL func_bulk_transfer_cb(struct libusb_transfer* transfer)
 {
-	ASYNC_TRANSFER_USER_DATA* user_data = nullptr;
 	uint32_t streamID = 0;
-	wArrayList* list = nullptr;
 
-	user_data = (ASYNC_TRANSFER_USER_DATA*)transfer->user_data;
+	ASYNC_TRANSFER_USER_DATA* user_data = (ASYNC_TRANSFER_USER_DATA*)transfer->user_data;
 	if (!user_data)
 	{
 		WLog_ERR(TAG, "Invalid transfer->user_data!");
 		return;
 	}
-	list = user_data->queue;
+	wArrayList* list = user_data->queue;
 	ArrayList_Lock(list);
 	streamID = stream_id_from_buffer(transfer);
 
@@ -427,10 +425,47 @@ static void LIBUSB_CALL func_bulk_transfer_cb(struct libusb_transfer* transfer)
 		    ((STREAM_ID_PROXY << 30) | user_data->idev->get_ReqCompletion(user_data->idev));
 		const UINT32 RequestID = streamID & INTERFACE_ID_MASK;
 
+		UINT32 status = USBD_STATUS_SUCCESS;
+		switch (transfer->status)
+		{
+			case LIBUSB_TRANSFER_COMPLETED:
+				status = USBD_STATUS_SUCCESS;
+				break;
+
+			case LIBUSB_TRANSFER_ERROR:
+				status = USBD_STATUS_CANCELED;
+				break;
+
+			case LIBUSB_TRANSFER_TIMED_OUT:
+				status = USBD_STATUS_TIMEOUT;
+				break;
+
+				/* complete with a non error status */
+			case LIBUSB_TRANSFER_CANCELLED:
+				status = USBD_STATUS_SUCCESS;
+				break;
+
+			case LIBUSB_TRANSFER_STALL:
+				status = USBD_STATUS_STALL_PID;
+				break;
+
+			case LIBUSB_TRANSFER_NO_DEVICE:
+				status = USBD_STATUS_DEVICE_GONE;
+				break;
+
+			case LIBUSB_TRANSFER_OVERFLOW:
+				status = USBD_STATUS_BABBLE_DETECTED;
+				break;
+
+			default:
+				status = USBD_STATUS_CANCELED;
+				break;
+		}
+
 		user_data->cb(user_data->idev, user_data->callback, user_data->data, InterfaceId,
 		              user_data->noack, user_data->MessageId, RequestID,
-		              WINPR_ASSERTING_INT_CAST(uint32_t, transfer->num_iso_packets),
-		              transfer->status, user_data->StartFrame, user_data->ErrorCount,
+		              WINPR_ASSERTING_INT_CAST(uint32_t, transfer->num_iso_packets), status,
+		              user_data->StartFrame, user_data->ErrorCount,
 		              WINPR_ASSERTING_INT_CAST(uint32_t, transfer->actual_length),
 		              user_data->transferDir);
 		user_data->data = nullptr;
@@ -795,6 +830,9 @@ libusb_udev_complete_msconfig_setup(IUDEVICE* idev, MSUSB_CONFIG_DESCRIPTOR* MsC
 }
 
 WINPR_ATTR_NODISCARD
+static BOOL libusb_udev_detach_kernel_driver(IUDEVICE* idev);
+
+WINPR_ATTR_NODISCARD
 static int libusb_udev_select_configuration(IUDEVICE* idev, UINT32 bConfigurationValue)
 {
 	UDEVICE* pdev = (UDEVICE*)idev;
@@ -818,6 +856,15 @@ static int libusb_udev_select_configuration(IUDEVICE* idev, UINT32 bConfiguratio
 	{
 		func_config_release_all_interface(pdev->urbdrc, libusb_handle, *LibusbConfig);
 	}
+
+	/* A kernel driver may have bound after the one-time detach done when the device was
+	 * announced: with hotplug the device is added on arrival, while usb-storage, uvcvideo or
+	 * snd-usb-audio probe a moment later. The kernel then rejects the configuration change
+	 * with EBUSY ("interface claimed by usb-storage while 'xfreerdp3' sets config") and the
+	 * device stays with the local driver. Detach again before changing the configuration. */
+	pdev->status &= (UINT16)~URBDRC_DEVICE_DETACH_KERNEL;
+	if (!libusb_udev_detach_kernel_driver(idev))
+		return -1;
 
 	/* The configuration value -1 is mean to put the device in unconfigured state. */
 	if (bConfigurationValue == 0)
@@ -1295,18 +1342,26 @@ static void libusb_udev_channel_closed(IUDEVICE* idev)
 		const uint8_t devNr = idev->get_dev_number(idev);
 		IWTSVirtualChannel* channel = nullptr;
 
-		if (pdev->channelManager)
-			channel = IFCALLRESULT(nullptr, pdev->channelManager->FindChannelById,
-			                       pdev->channelManager, pdev->channelID);
+		IUDEVMAN* udevman = pdev->urbdrc->udevman;
+		WINPR_ASSERT(udevman);
 
-		pdev->status |= URBDRC_DEVICE_CHANNEL_CLOSED;
-
-		if (channel)
+		udevman->loading_lock(udevman);
+		if ((pdev->status & URBDRC_DEVICE_CHANNEL_CLOSED) == 0)
 		{
-			const UINT rc = channel->Write(channel, 0, nullptr, nullptr);
-			if (rc != CHANNEL_RC_OK)
-				WLog_Print(urbdrc->log, WLOG_WARN, "channel->Write failed with %" PRIu32, rc);
+			if (pdev->channelManager)
+				channel = IFCALLRESULT(nullptr, pdev->channelManager->FindChannelById,
+				                       pdev->channelManager, pdev->channelID);
+
+			pdev->status |= URBDRC_DEVICE_CHANNEL_CLOSED;
+
+			if (channel)
+			{
+				const UINT rc = channel->Write(channel, 0, nullptr, nullptr);
+				if (rc != CHANNEL_RC_OK)
+					WLog_Print(urbdrc->log, WLOG_WARN, "channel->Write failed with %" PRIu32, rc);
+			}
 		}
+		udevman->loading_unlock(udevman);
 
 		if (!urbdrc->udevman->unregister_udevice(urbdrc->udevman, busNr, devNr))
 			WLog_Print(urbdrc->log, WLOG_WARN, "unregister_udevice failed for %d, %d", busNr,
@@ -1363,6 +1418,20 @@ static int libusb_udev_query_device_port_status(IUDEVICE* idev, UINT32* UsbdStat
 	}
 
 	return success;
+}
+
+WINPR_ATTR_NODISCARD
+static int libusb_udev_reset_device(IUDEVICE* idev)
+{
+	UDEVICE* pdev = (UDEVICE*)idev;
+
+	if (!pdev || !pdev->urbdrc)
+		return -1;
+
+	URBDRC_PLUGIN* urbdrc = pdev->urbdrc;
+	const int ret = libusb_reset_device(pdev->libusb_handle);
+	log_libusb_result(urbdrc->log, WLOG_DEBUG, "libusb_reset_device", ret);
+	return ret;
 }
 
 WINPR_ATTR_NODISCARD
@@ -1497,14 +1566,16 @@ static int libusb_udev_bulk_or_interrupt_transfer(
 	UDEVICE* pdev = (UDEVICE*)idev;
 	const LIBUSB_ENDPOINT_DESCEIPTOR* ep_desc = nullptr;
 	struct libusb_transfer* transfer = nullptr;
-	URBDRC_PLUGIN* urbdrc = nullptr;
 	ASYNC_TRANSFER_USER_DATA* user_data = nullptr;
 	uint32_t streamID = 0x80000000 | RequestId;
 
 	if (!pdev || !pdev->LibusbConfig || !pdev->urbdrc)
 		return -1;
 
-	urbdrc = pdev->urbdrc;
+	if (BufferSize > INT32_MAX)
+		return -1;
+
+	URBDRC_PLUGIN* urbdrc = pdev->urbdrc;
 	user_data = async_transfer_user_data_new(idev, MessageId, 36, BufferSize, data, 0, NoAck,
 	                                         transferDir, cb, callback);
 
@@ -1697,20 +1768,24 @@ static void udev_free(IUDEVICE* idev)
 		log_libusb_result(urbdrc->log, WLOG_ERROR, "libusb_reset_device", rc);
 	}
 
-	/* HACK: We need to wait until the cancel transfer has been processed by
-	 * poll_libusb_events
-	 */
-	Sleep(100);
+	while (ArrayList_Count(udev->request_queue) > 0)
+	{
+		/* HACK: We need to wait until the cancel transfer has been processed by
+		 * poll_libusb_events
+		 */
+		Sleep(100);
+	}
 
 	/* release all interface and  attach kernel driver */
 	if (!udev->iface.attach_kernel_driver(idev))
 		WLog_Print(udev->urbdrc->log, WLOG_WARN, "attach_kernel_driver failed for device");
-	ArrayList_Free(udev->request_queue);
-	/* free the config descriptor that send from windows */
-	msusb_msconfig_free(udev->MsConfig);
 	libusb_unref_device(udev->libusb_dev);
 	libusb_close(udev->libusb_handle);
 	libusb_close(udev->hub_handle);
+
+	ArrayList_Free(udev->request_queue);
+	/* free the config descriptor that send from windows */
+	msusb_msconfig_free(udev->MsConfig);
 	free(udev->devDescriptor);
 	free(idev);
 }
@@ -1757,6 +1832,7 @@ static void udev_load_interface(UDEVICE* pdev)
 	pdev->iface.detach_kernel_driver = libusb_udev_detach_kernel_driver;
 	pdev->iface.attach_kernel_driver = libusb_udev_attach_kernel_driver;
 	pdev->iface.query_device_port_status = libusb_udev_query_device_port_status;
+	pdev->iface.reset_device = libusb_udev_reset_device;
 	pdev->iface.free = udev_free;
 }
 
@@ -1788,6 +1864,9 @@ static int udev_get_device_handle(URBDRC_PLUGIN* urbdrc, libusb_context* ctx, UD
 				libusb_unref_device(dev);
 				continue;
 			}
+
+			/* also detach a late-bound kernel driver when an interface is claimed */
+			(void)libusb_set_auto_detach_kernel_driver(pdev->libusb_handle, 1);
 
 			/* get port number */
 			error = libusb_get_port_numbers(dev, port_numbers, sizeof(port_numbers));

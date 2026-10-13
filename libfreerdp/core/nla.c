@@ -43,6 +43,7 @@
 #include <winpr/debug.h>
 #include <winpr/asn1.h>
 #include <winpr/secapi.h>
+#include <winpr/nt.h>
 
 #include "../crypto/tls.h"
 #include "nego.h"
@@ -938,11 +939,6 @@ static int nla_server_authenticate(rdpNla* nla)
 
 		if (res == 1)
 		{
-			if (nla->earlyUserAuth)
-			{
-				if (!nla_send_early_user_auth(nla, TRUE))
-					goto fail;
-			}
 			ret = 1;
 			break;
 		}
@@ -951,6 +947,11 @@ static int nla_server_authenticate(rdpNla* nla)
 	/* Receive encrypted credentials */
 	if (!nla_server_recv_credentials(nla))
 		ret = -1;
+	else if (nla->earlyUserAuth)
+	{
+		if (!nla_send_early_user_auth(nla, ret == 1))
+			goto fail;
+	}
 
 fail:
 	nla_buffer_free(nla);
@@ -2205,11 +2206,13 @@ static int nla_decode_ts_request(rdpNla* nla, wStream* s)
 		return -1;
 	}
 
+	size_t tagcount = 0;
 	while (WinPrAsn1DecReadContextualTag(&dec, &tag, &dec2) != 0)
 	{
 		WinPrAsn1Decoder dec3 = WinPrAsn1Decoder_init();
 		WinPrAsn1_OctetString octet_string = WINPR_C_ARRAY_INIT;
 
+		tagcount++;
 		switch (tag)
 		{
 			case 1:
@@ -2267,7 +2270,7 @@ static int nla_decode_ts_request(rdpNla* nla, wStream* s)
 		}
 	}
 
-	return 1;
+	return tagcount > 0 ? 1 : -1;
 }
 
 int nla_recv_pdu(rdpNla* nla, wStream* s)
@@ -2354,6 +2357,13 @@ int nla_recv_pdu(rdpNla* nla, wStream* s)
 
 				case STATUS_LOGON_TYPE_NOT_GRANTED:
 					code = FREERDP_ERROR_CONNECT_LOGON_TYPE_NOT_GRANTED;
+					break;
+
+				case STATUS_NTLM_BLOCKED:
+				/* mstsc shows the same ambiguity for this code: NTLM policy block, or a
+				 * CredSSP encryption oracle remediation mismatch. */
+				case SEC_E_UNSUPPORTED_FUNCTION:
+					code = FREERDP_ERROR_CONNECT_NTLM_BLOCKED;
 					break;
 
 				default:

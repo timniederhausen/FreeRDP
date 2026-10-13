@@ -36,6 +36,10 @@
 #include "dsp_fdk_aac.h"
 #endif
 
+#if defined(WITH_MEDIACODEC)
+#include "dsp_mediacodec.h"
+#endif
+
 #if !defined(WITH_DSP_FFMPEG)
 #if defined(WITH_GSM)
 #include <gsm/gsm.h>
@@ -493,6 +497,14 @@ static BOOL freerdp_dsp_decode_gsm610(FREERDP_DSP_CONTEXT* WINPR_RESTRICT contex
 
 	while (offset < size)
 	{
+		/* gsm_decode(GSM_OPT_WAV49) requires alternating fixed 33/32 bytes as input.
+		 * abort if the data supplied was inconsistent.
+		 */
+		const BOOL large = (offset % 65) == 0;
+		const size_t toadd = large ? 33 : 32;
+		if (size - offset < toadd)
+			return FALSE;
+
 		gsm_signal gsmBlockBuffer[160] = WINPR_C_ARRAY_INIT;
 		const int rc =
 		    gsm_decode(context->gsm,
@@ -502,10 +514,7 @@ static BOOL freerdp_dsp_decode_gsm610(FREERDP_DSP_CONTEXT* WINPR_RESTRICT contex
 		if (rc < 0)
 			return FALSE;
 
-		if ((offset % 65) == 0)
-			offset += 33;
-		else
-			offset += 32;
+		offset += toadd;
 
 		if (!Stream_EnsureRemainingCapacity(out, sizeof(gsmBlockBuffer)))
 			return FALSE;
@@ -713,13 +722,12 @@ static BOOL freerdp_dsp_encode_opus(FREERDP_DSP_CONTEXT* WINPR_RESTRICT context,
 
 	const size_t src_frames = size / sizeof(opus_int16) / context->common.format.nChannels;
 	const opus_int16* src_data = WINPR_PACKED_ALIGN_CAST(const opus_int16*, src);
-	const opus_int32 frames = opus_encode(
+	const opus_int32 bytes = opus_encode(
 	    context->opus_encoder, src_data, WINPR_ASSERTING_INT_CAST(opus_int32, src_frames),
 	    Stream_Pointer(out), WINPR_ASSERTING_INT_CAST(opus_int32, max_size));
-	if (frames < 0)
+	if (bytes < 0)
 		return FALSE;
-	return Stream_SafeSeek(out,
-	                       (size_t)frames * context->common.format.nChannels * sizeof(int16_t));
+	return Stream_SafeSeek(out, (size_t)bytes);
 }
 #endif
 
@@ -1321,6 +1329,10 @@ void freerdp_dsp_context_free(FREERDP_DSP_CONTEXT* context)
 	fdk_aac_dsp_uninit(ctx);
 #endif
 
+#if defined(WITH_MEDIACODEC)
+	mediacodec_aac_dsp_uninit((FREERDP_DSP_COMMON_CONTEXT*)context);
+#endif
+
 #if defined(WITH_DSP_FFMPEG)
 	freerdp_dsp_ffmpeg_context_free(context);
 #else
@@ -1371,6 +1383,12 @@ BOOL freerdp_dsp_encode(FREERDP_DSP_CONTEXT* WINPR_RESTRICT context,
                         const BYTE* WINPR_RESTRICT pdata, size_t length,
                         wStream* WINPR_RESTRICT out)
 {
+#if defined(WITH_MEDIACODEC)
+	FREERDP_DSP_COMMON_CONTEXT* mcctx = (FREERDP_DSP_COMMON_CONTEXT*)context;
+	if (mcctx && (mcctx->format.wFormatTag == WAVE_FORMAT_AAC_MS))
+		return mediacodec_aac_dsp_encode(mcctx, srcFormat, pdata, length, out);
+#endif
+
 #if defined(WITH_FDK_AAC)
 	FREERDP_DSP_COMMON_CONTEXT* ctx = (FREERDP_DSP_COMMON_CONTEXT*)context;
 	WINPR_ASSERT(ctx);
@@ -1448,6 +1466,12 @@ BOOL freerdp_dsp_decode(FREERDP_DSP_CONTEXT* WINPR_RESTRICT context,
                         const AUDIO_FORMAT* WINPR_RESTRICT srcFormat,
                         const BYTE* WINPR_RESTRICT data, size_t length, wStream* WINPR_RESTRICT out)
 {
+#if defined(WITH_MEDIACODEC)
+	FREERDP_DSP_COMMON_CONTEXT* mcctx = (FREERDP_DSP_COMMON_CONTEXT*)context;
+	if (mcctx && (mcctx->format.wFormatTag == WAVE_FORMAT_AAC_MS))
+		return mediacodec_aac_dsp_decode(mcctx, srcFormat, data, length, out);
+#endif
+
 #if defined(WITH_FDK_AAC)
 	FREERDP_DSP_COMMON_CONTEXT* ctx = (FREERDP_DSP_COMMON_CONTEXT*)context;
 	WINPR_ASSERT(ctx);
@@ -1511,6 +1535,11 @@ BOOL freerdp_dsp_decode(FREERDP_DSP_CONTEXT* WINPR_RESTRICT context,
 
 BOOL freerdp_dsp_supports_format(const AUDIO_FORMAT* WINPR_RESTRICT format, BOOL encode)
 {
+#if defined(WITH_MEDIACODEC)
+	if (format && (format->wFormatTag == WAVE_FORMAT_AAC_MS))
+		return mediacodec_aac_dsp_supports_format(format, encode);
+#endif
+
 #if defined(WITH_FDK_AAC)
 	switch (format->wFormatTag)
 	{
@@ -1593,6 +1622,19 @@ BOOL freerdp_dsp_context_reset(FREERDP_DSP_CONTEXT* WINPR_RESTRICT context,
                                const AUDIO_FORMAT* WINPR_RESTRICT targetFormat,
                                WINPR_ATTR_UNUSED UINT32 FramesPerPacket)
 {
+#if defined(WITH_MEDIACODEC)
+	if (!context || !targetFormat)
+		return FALSE;
+
+	if (targetFormat->wFormatTag == WAVE_FORMAT_AAC_MS)
+	{
+		FREERDP_DSP_COMMON_CONTEXT* ctx = (FREERDP_DSP_COMMON_CONTEXT*)context;
+		mediacodec_aac_dsp_uninit(ctx);
+		ctx->format = *targetFormat;
+		return mediacodec_aac_dsp_init(ctx, FramesPerPacket);
+	}
+#endif
+
 #if defined(WITH_FDK_AAC)
 	WINPR_ASSERT(targetFormat);
 	if (targetFormat->wFormatTag == WAVE_FORMAT_AAC_MS)

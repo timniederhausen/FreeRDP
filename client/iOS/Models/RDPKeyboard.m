@@ -12,8 +12,8 @@
 #include <freerdp/locale/keyboard.h>
 
 @interface RDPKeyboard (Private)
-- (void)sendUnicodeKey:(int)character up:(BOOL)up;
-- (void)handleSpecialKey:(int)character;
+- (void)sendUnicodeKey:(NSInteger)character up:(BOOL)up;
+- (void)handleSpecialKey:(NSInteger)character;
 - (void)handleAlphaNumChar:(int)character;
 - (void)notifyDelegateModifiersChanged;
 @end
@@ -21,7 +21,7 @@
 @implementation RDPKeyboard
 
 @synthesize delegate = _delegate, ctrlPressed = _ctrl_pressed, altPressed = _alt_pressed,
-            shiftPressed = _shift_pressed, winPressed = _win_pressed;
+            shiftPressed = _shift_pressed, winPressed = _win_pressed, altGrPressed = _altgr_pressed;
 
 - (id)init
 {
@@ -136,6 +136,7 @@
 	_ctrl_pressed = NO;
 	_shift_pressed = NO;
 	_win_pressed = NO;
+	_altgr_pressed = NO;
 
 	_session = session;
 	_delegate = delegate;
@@ -143,7 +144,7 @@
 
 - (void)reset
 {
-	// reset pressed ctrl, alt, shift or win key
+	// reset pressed ctrl, alt, alt gr, shift or win key
 	if (_shift_pressed)
 		[self toggleShiftKey];
 	if (_alt_pressed)
@@ -152,31 +153,37 @@
 		[self toggleCtrlKey];
 	if (_win_pressed)
 		[self toggleWinKey];
+	if (_altgr_pressed)
+		[self toggleAltGrKey];
 }
 
 // handles button pressed input event from the iOS keyboard
 // performs all conversions etc.
-- (void)sendUnicode:(int)character
+- (void)sendUnicode:(NSInteger)character
 {
 	if ((character >= 0) && (character < 256) && isalnum((unsigned char)character))
-		[self handleAlphaNumChar:character];
+		[self handleAlphaNumChar:(int)character];
 	else
 		[self handleSpecialKey:character];
 
 	[self reset];
 }
 
-// send a backspace key press
-- (void)sendVirtualKeyCode:(int)keyCode
+// send a key press and release modifier key
+- (void)sendVirtualKeyCode:(NSInteger)keyCode
 {
 	[self sendVirtualKey:keyCode up:NO];
 	[self sendVirtualKey:keyCode up:YES];
+
+	// release modifier key
+	[self reset];
 }
 
 // sends the vk code to the session
-- (void)sendVirtualKey:(int)vKey up:(BOOL)up
+- (void)sendVirtualKey:(NSInteger)vKey up:(BOOL)up
 {
-	DWORD scancode = GetVirtualScanCodeFromVirtualKeyCode(vKey, 4);
+	const DWORD dvKey = WINPR_ASSERTING_INT_CAST(DWORD, vKey);
+	DWORD scancode = GetVirtualScanCodeFromVirtualKeyCode(dvKey, 4);
 	int flags = (up ? KBD_FLAGS_RELEASE : KBD_FLAGS_DOWN);
 	flags |= ((scancode & KBDEXT) ? KBD_FLAGS_EXTENDED : 0);
 	[_session
@@ -224,6 +231,14 @@
 	[self notifyDelegateModifiersChanged];
 }
 
+// toggle alt gr (RightAlt) key, returns true if pressed, otherwise false
+- (void)toggleAltGrKey
+{
+	[self sendVirtualKey:(VK_RMENU | KBDEXT) up:_altgr_pressed];
+	_altgr_pressed = !_altgr_pressed;
+	[self notifyDelegateModifiersChanged];
+}
+
 #pragma mark Sending special key strokes
 
 - (void)sendEnterKeyStroke
@@ -239,6 +254,16 @@
 - (void)sendBackspaceKeyStroke
 {
 	[self sendVirtualKeyCode:VK_BACK];
+}
+
+- (void)sendDeleteKeyStroke
+{
+	[self sendVirtualKeyCode:(VK_DELETE | KBDEXT)];
+}
+
+- (void)sendTabKeyStroke
+{
+	[self sendVirtualKeyCode:VK_TAB];
 }
 
 @end
@@ -271,7 +296,7 @@
 		[self sendVirtualKey:VK_LSHIFT up:YES];
 }
 
-- (void)handleSpecialKey:(int)character
+- (void)handleSpecialKey:(NSInteger)character
 {
 	if ((character >= 0) && (character < 256) && (_virtual_key_map[character] != 0))
 	{
@@ -295,14 +320,15 @@
 	[self sendUnicodeKey:character up:YES];
 }
 
-- (void)sendUnicodeKey:(int)character up:(BOOL)up
+- (void)sendUnicodeKey:(NSInteger)character up:(BOOL)up
 {
+	const UINT16 ucharacter = WINPR_ASSERTING_INT_CAST(UINT16, character);
 	[_session
 	    sendInputEvent:[NSDictionary
 	                       dictionaryWithObjectsAndKeys:
 	                           @"keyboard", @"type", @"unicode", @"subtype",
 	                           [NSNumber numberWithUnsignedShort:(up ? KBD_FLAGS_RELEASE : 0)],
-	                           @"flags", [NSNumber numberWithUnsignedShort:character],
+	                           @"flags", [NSNumber numberWithUnsignedShort:ucharacter],
 	                           @"unicode_char", nil]];
 }
 
