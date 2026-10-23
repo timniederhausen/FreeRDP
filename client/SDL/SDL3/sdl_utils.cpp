@@ -129,16 +129,12 @@ bool sdl_push_user_event(Uint32 type, ...)
 			event->data1 = va_arg(ap, char*);
 			event->data2 = va_arg(ap, char*);
 			break;
-		case SDL_EVENT_USER_UPDATE:
-			event->data1 = va_arg(ap, void*);
-			break;
 		case SDL_EVENT_USER_POINTER_POSITION:
 			event->data1 = reinterpret_cast<void*>(static_cast<uintptr_t>(va_arg(ap, UINT32)));
 			event->data2 = reinterpret_cast<void*>(static_cast<uintptr_t>(va_arg(ap, UINT32)));
 			break;
 		case SDL_EVENT_USER_POINTER_SET:
 			event->data1 = va_arg(ap, void*);
-			event->data2 = va_arg(ap, void*);
 			break;
 		case SDL_EVENT_USER_CREATE_WINDOWS:
 			event->data1 = va_arg(ap, void*);
@@ -156,6 +152,7 @@ bool sdl_push_user_event(Uint32 type, ...)
 			event->data1 = reinterpret_cast<void*>(static_cast<uintptr_t>(va_arg(ap, UINT32)));
 			event->code = va_arg(ap, int); /* RAIL_WMSZ_* move/resize type */
 			break;
+		case SDL_EVENT_USER_UPDATE:
 		case SDL_EVENT_USER_WINDOW_MINIMIZE:
 		case SDL_EVENT_USER_OVERLAY:
 		case SDL_EVENT_USER_QUIT:
