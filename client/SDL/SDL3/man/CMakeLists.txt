@@ -1,4 +1,5 @@
 set(DEPS
+    sdl3-freerdp-options.1
     ../../../common/man/freerdp-global-options.1
     ../../../common/man/freerdp-global-envvar.1
     sdl3-freerdp-envvar.1

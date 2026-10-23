@@ -158,170 +158,224 @@ static void sdl_term_handler([[maybe_unused]] int signum, [[maybe_unused]] const
 	std::ignore = sdl_push_quit();
 }
 
+/* Milliseconds until deadline, rounded up At most maxMS */
+[[nodiscard]] static Sint32 sdl_ms_until(Uint64 deadline, Sint32 maxMS)
+{
+	const Uint64 now = SDL_GetTicksNS();
+	if (deadline <= now)
+		return 0;
+
+	const auto nsPerMS = static_cast<Uint64>(SDL_NS_PER_MS);
+	const Uint64 ms = (deadline - now + nsPerMS - 1) / nsPerMS;
+	if (ms >= static_cast<Uint64>(maxMS))
+		return maxMS;
+	return static_cast<Sint32>(ms);
+}
+
 [[nodiscard]] static int sdl_run(SdlContext* sdl)
 {
 	int rc = -1;
 	WINPR_ASSERT(sdl);
 
+	constexpr Sint32 idleTimeoutMS = 1000;
+	/* minimum time between two drawn screen updates, 0 draws every update */
+	const Uint64 frameInterval = sdl->frameInterval();
+	Uint64 nextFrame = 0;
+	bool redrawPending = false;
+
 	try
 	{
 		while (!sdl->shallAbort())
 		{
-			SDL_Event windowEvent = {};
-			while (!sdl->shallAbort() && SDL_WaitEventTimeout(nullptr, 1000))
+			/* Prefer to keep our current frame interval if we have one queued... */
+			const Sint32 timeoutMS =
+			    redrawPending ? sdl_ms_until(nextFrame, idleTimeoutMS) : idleTimeoutMS;
+			if (SDL_WaitEventTimeout(nullptr, timeoutMS))
 			{
-				/* Only poll standard SDL events and SDL_EVENT_USERS meant to create
-				 * dialogs. do not process the dialog return value events here.
-				 */
-				const int prc = SDL_PeepEvents(&windowEvent, 1, SDL_GETEVENT, SDL_EVENT_FIRST,
-				                               SDL_EVENT_USER_RETRY_DIALOG);
-				if (prc < 0)
+				bool handled = false;
+				while (!sdl->shallAbort())
 				{
-					if (sdl_log_error(prc, sdl->getWLog(), "SDL_PeepEvents"))
+					/* Only poll standard SDL events and SDL_EVENT_USERS meant to create
+					 * dialogs. do not process the dialog return value events here.
+					 */
+					SDL_Event windowEvent = {};
+					const int prc = SDL_PeepEvents(&windowEvent, 1, SDL_GETEVENT, SDL_EVENT_FIRST,
+					                               SDL_EVENT_USER_RETRY_DIALOG);
+					if (prc < 0)
+					{
+						(void) sdl_log_error(prc, sdl->getWLog(), "SDL_PeepEvents");
+						break;
+					}
+					/* Queue drained */
+					if (prc == 0)
+						break;
+					handled = true;
+
+					WLog_Print(sdl->getWLog(), WLOG_TRACE, "got event %s [0x%08" PRIx32 "]",
+					           sdl::utils::toString(windowEvent.type).c_str(), windowEvent.type);
+					/* The connection dialog paints on window events, so let it see them even
+					 * after the session is gone: it may still show an error message. */
+					if (sdl->getDialog().handleEvent(windowEvent))
 						continue;
+
+					/* Still handle a quit, it cancels the session */
+					if (sdl->shallAbort(true) && (windowEvent.type != SDL_EVENT_QUIT))
+						continue;
+
+					if (!sdl->handleEvent(windowEvent))
+						throw ErrorMsg{ -1, windowEvent.type, "sdl->handleEvent" };
+
+					switch (windowEvent.type)
+					{
+						case SDL_EVENT_QUIT:
+							std::ignore = sdl->abortConnect();
+							break;
+						case SDL_EVENT_USER_CERT_DIALOG:
+						{
+							SDLConnectionDialogHider hider(sdl);
+							auto title = static_cast<const char*>(windowEvent.user.data1);
+							auto msg = static_cast<const char*>(windowEvent.user.data2);
+							if (!sdl_cert_dialog_show(title, msg))
+								throw ErrorMsg{ -1, windowEvent.type, "sdl_cert_dialog_show" };
+						}
+						break;
+						case SDL_EVENT_USER_SHOW_DIALOG:
+						{
+							SDLConnectionDialogHider hider(sdl);
+							auto title = static_cast<const char*>(windowEvent.user.data1);
+							auto msg = static_cast<const char*>(windowEvent.user.data2);
+							if (!sdl_message_dialog_show(title, msg, windowEvent.user.code))
+								throw ErrorMsg{ -1, windowEvent.type, "sdl_message_dialog_show" };
+						}
+						break;
+						case SDL_EVENT_USER_SCARD_DIALOG:
+						{
+							SDLConnectionDialogHider hider(sdl);
+							auto title = static_cast<const char*>(windowEvent.user.data1);
+							auto msg = static_cast<const char**>(windowEvent.user.data2);
+							if (!sdl_scard_dialog_show(title, windowEvent.user.code, msg))
+								throw ErrorMsg{ -1, windowEvent.type, "sdl_scard_dialog_show" };
+						}
+						break;
+						case SDL_EVENT_USER_AUTH_DIALOG:
+						{
+							SDLConnectionDialogHider hider(sdl);
+							if (!sdl_auth_dialog_show(
+							        reinterpret_cast<const SDL_UserAuthArg*>(windowEvent.padding)))
+								throw ErrorMsg{ -1, windowEvent.type, "sdl_auth_dialog_show" };
+						}
+						break;
+						case SDL_EVENT_USER_UPDATE:
+							/* Only redraw once after the event queue is drained */
+							redrawPending = true;
+							break;
+						case SDL_EVENT_USER_WINDOW_INFO:
+							sdl->flushWindowInfo();
+							break;
+						case SDL_EVENT_USER_RENDERER:
+							if (!sdl->presentRenderers())
+								throw ErrorMsg{ -1, windowEvent.type, "sdl->presentRenderers" };
+							break;
+						case SDL_EVENT_USER_OVERLAY:
+							if (!sdl->updateOverlay())
+								throw ErrorMsg{ -1, windowEvent.type, "sdl->updateOverlay" };
+							break;
+						case SDL_EVENT_USER_CREATE_WINDOWS:
+						{
+							auto ctx = static_cast<SdlContext*>(windowEvent.user.data1);
+							if (!ctx->createWindows())
+								throw ErrorMsg{ -1, windowEvent.type, "sdl->createWindows" };
+						}
+						break;
+						case SDL_EVENT_USER_WINDOW_RESIZEABLE:
+						{
+							auto window = static_cast<SdlWindow*>(windowEvent.user.data1);
+							const bool use = windowEvent.user.code != 0;
+							if (window)
+								window->resizeable(use);
+						}
+						break;
+						case SDL_EVENT_USER_WINDOW_FULLSCREEN:
+						{
+							auto window = static_cast<SdlWindow*>(windowEvent.user.data1);
+							const bool enter = windowEvent.user.code != 0;
+							const bool forceOriginalDisplay = windowEvent.user.data2 != nullptr;
+							if (window)
+								window->fullscreen(enter, forceOriginalDisplay);
+						}
+						break;
+						case SDL_EVENT_USER_WINDOW_MINIMIZE:
+							if (!sdl->minimizeAllWindows())
+								throw ErrorMsg{ -1, windowEvent.type, "sdl->minimizeAllWindows" };
+							break;
+						case SDL_EVENT_USER_POINTER_NULL:
+							if (!sdl->setCursor(SdlContext::CURSOR_NULL))
+								throw ErrorMsg{ -1, windowEvent.type, "sdl->setCursor" };
+							break;
+						case SDL_EVENT_USER_POINTER_DEFAULT:
+							if (!sdl->setCursor(SdlContext::CURSOR_DEFAULT))
+								throw ErrorMsg{ -1, windowEvent.type, "sdl->setCursor" };
+							break;
+						case SDL_EVENT_USER_POINTER_POSITION:
+						{
+							const auto x = static_cast<INT32>(
+							    reinterpret_cast<uintptr_t>(windowEvent.user.data1));
+							const auto y = static_cast<INT32>(
+							    reinterpret_cast<uintptr_t>(windowEvent.user.data2));
+							if (!sdl->moveMouseTo(
+							        { static_cast<float>(x) * 1.0f, static_cast<float>(y) * 1.0f }))
+								throw ErrorMsg{ -1, windowEvent.type, "sdl->moveMouseTo" };
+						}
+						break;
+						case SDL_EVENT_USER_POINTER_SET:
+							if (!sdl->setCursor(static_cast<rdpPointer*>(windowEvent.user.data1)))
+								throw ErrorMsg{ -1, windowEvent.type, "sdl->setCursor" };
+							break;
+						case SDL_EVENT_USER_RAIL_MOVE:
+						{
+							const auto id = static_cast<uint32_t>(
+							    reinterpret_cast<uintptr_t>(windowEvent.user.data1));
+							const auto moveType = static_cast<uint16_t>(windowEvent.user.code);
+							sdl->getRailChannelContext().handleLocalMoveRequested(id, moveType);
+						}
+						break;
+						case SDL_EVENT_USER_QUIT:
+						default:
+							break;
+					}
 				}
 
-				WLog_Print(sdl->getWLog(), WLOG_TRACE, "got event %s [0x%08" PRIx32 "]",
-				           sdl::utils::toString(windowEvent.type).c_str(), windowEvent.type);
-				/* The connection dialog paints on window events, so let it see them even
-				 * after the session is gone: it may still show an error message. */
-				if (sdl->getDialog().handleEvent(windowEvent))
-					continue;
+				/* Only dialog results for the RDP thread are queued (SDL_WaitEventTimeout counts
+				 * them too): give it time to collect them instead of spinning. */
+				if (!handled)
+					SDL_Delay(1);
+			}
 
-				/* Still handle a quit, it cancels the session */
-				if (sdl->shallAbort(true) && (windowEvent.type != SDL_EVENT_QUIT))
-					continue;
+			/* No point in drawing anything if we're done */
+			if (redrawPending && sdl->shallAbort(true))
+				redrawPending = false;
 
-				if (!sdl->handleEvent(windowEvent))
-					throw ErrorMsg{ -1, windowEvent.type, "sdl->handleEvent" };
-
-				switch (windowEvent.type)
+			if (redrawPending)
+			{
+				const Uint64 now = SDL_GetTicksNS();
+				if (now >= nextFrame)
 				{
-					case SDL_EVENT_QUIT:
-						std::ignore = sdl->abortConnect();
-						break;
-					case SDL_EVENT_USER_CERT_DIALOG:
-					{
-						SDLConnectionDialogHider hider(sdl);
-						auto title = static_cast<const char*>(windowEvent.user.data1);
-						auto msg = static_cast<const char*>(windowEvent.user.data2);
-						if (!sdl_cert_dialog_show(title, msg))
-							throw ErrorMsg{ -1, windowEvent.type, "sdl_cert_dialog_show" };
-					}
-					break;
-					case SDL_EVENT_USER_SHOW_DIALOG:
-					{
-						SDLConnectionDialogHider hider(sdl);
-						auto title = static_cast<const char*>(windowEvent.user.data1);
-						auto msg = static_cast<const char*>(windowEvent.user.data2);
-						if (!sdl_message_dialog_show(title, msg, windowEvent.user.code))
-							throw ErrorMsg{ -1, windowEvent.type, "sdl_message_dialog_show" };
-					}
-					break;
-					case SDL_EVENT_USER_SCARD_DIALOG:
-					{
-						SDLConnectionDialogHider hider(sdl);
-						auto title = static_cast<const char*>(windowEvent.user.data1);
-						auto msg = static_cast<const char**>(windowEvent.user.data2);
-						if (!sdl_scard_dialog_show(title, windowEvent.user.code, msg))
-							throw ErrorMsg{ -1, windowEvent.type, "sdl_scard_dialog_show" };
-					}
-					break;
-					case SDL_EVENT_USER_AUTH_DIALOG:
-					{
-						SDLConnectionDialogHider hider(sdl);
-						if (!sdl_auth_dialog_show(
-						        reinterpret_cast<const SDL_UserAuthArg*>(windowEvent.padding)))
-							throw ErrorMsg{ -1, windowEvent.type, "sdl_auth_dialog_show" };
-					}
-					break;
-					case SDL_EVENT_USER_UPDATE:
-					{
-						scoped_region16 dirty_region;
-						sdl->pop(dirty_region.data);
+					redrawPending = false;
 
-						if (!sdl->drawToWindows(&dirty_region.data))
-							throw ErrorMsg{ -1, windowEvent.type, "sdl->drawToWindows" };
+					scoped_region16 dirty_region;
+					sdl->pop(dirty_region.data);
+					if (!sdl->drawToWindows(&dirty_region.data))
+						throw ErrorMsg{ -1, SDL_EVENT_USER_UPDATE, "sdl->drawToWindows" };
 
-						/* geometry updates come with the session updates, not with the
-						 * renderers' frames */
-						if (sdl->hasRenderers() && !sdl->presentRenderers())
-							throw ErrorMsg{ -1, windowEvent.type, "sdl->presentRenderers" };
-					}
-					break;
-					case SDL_EVENT_USER_WINDOW_INFO:
-						sdl->flushWindowInfo();
-						break;
-					case SDL_EVENT_USER_RENDERER:
-						if (!sdl->presentRenderers())
-							throw ErrorMsg{ -1, windowEvent.type, "sdl->presentRenderers" };
-						break;
-					case SDL_EVENT_USER_OVERLAY:
-						if (!sdl->updateOverlay())
-							throw ErrorMsg{ -1, windowEvent.type, "sdl->updateOverlay" };
-						break;
-					case SDL_EVENT_USER_CREATE_WINDOWS:
-					{
-						auto ctx = static_cast<SdlContext*>(windowEvent.user.data1);
-						if (!ctx->createWindows())
-							throw ErrorMsg{ -1, windowEvent.type, "sdl->createWindows" };
-					}
-					break;
-					case SDL_EVENT_USER_WINDOW_RESIZEABLE:
-					{
-						auto window = static_cast<SdlWindow*>(windowEvent.user.data1);
-						const bool use = windowEvent.user.code != 0;
-						if (window)
-							window->resizeable(use);
-					}
-					break;
-					case SDL_EVENT_USER_WINDOW_FULLSCREEN:
-					{
-						auto window = static_cast<SdlWindow*>(windowEvent.user.data1);
-						const bool enter = windowEvent.user.code != 0;
-						const bool forceOriginalDisplay = windowEvent.user.data2 != nullptr;
-						if (window)
-							window->fullscreen(enter, forceOriginalDisplay);
-					}
-					break;
-					case SDL_EVENT_USER_WINDOW_MINIMIZE:
-						if (!sdl->minimizeAllWindows())
-							throw ErrorMsg{ -1, windowEvent.type, "sdl->minimizeAllWindows" };
-						break;
-					case SDL_EVENT_USER_POINTER_NULL:
-						if (!sdl->setCursor(SdlContext::CURSOR_NULL))
-							throw ErrorMsg{ -1, windowEvent.type, "sdl->setCursor" };
-						break;
-					case SDL_EVENT_USER_POINTER_DEFAULT:
-						if (!sdl->setCursor(SdlContext::CURSOR_DEFAULT))
-							throw ErrorMsg{ -1, windowEvent.type, "sdl->setCursor" };
-						break;
-					case SDL_EVENT_USER_POINTER_POSITION:
-					{
-						const auto x =
-						    static_cast<INT32>(reinterpret_cast<uintptr_t>(windowEvent.user.data1));
-						const auto y =
-						    static_cast<INT32>(reinterpret_cast<uintptr_t>(windowEvent.user.data2));
-						if (!sdl->moveMouseTo(
-						        { static_cast<float>(x) * 1.0f, static_cast<float>(y) * 1.0f }))
-							throw ErrorMsg{ -1, windowEvent.type, "sdl->moveMouseTo" };
-					}
-					break;
-					case SDL_EVENT_USER_POINTER_SET:
-						if (!sdl->setCursor(static_cast<rdpPointer*>(windowEvent.user.data1)))
-							throw ErrorMsg{ -1, windowEvent.type, "sdl->setCursor" };
-						break;
-					case SDL_EVENT_USER_RAIL_MOVE:
-					{
-						const auto id = static_cast<uint32_t>(
-						    reinterpret_cast<uintptr_t>(windowEvent.user.data1));
-						const auto moveType = static_cast<uint16_t>(windowEvent.user.code);
-						sdl->getRailChannelContext().handleLocalMoveRequested(id, moveType);
-					}
-					break;
-					case SDL_EVENT_USER_QUIT:
-					default:
-						break;
+					/* geometry updates come with the session updates, not with the
+					 * renderers' frames */
+					if (sdl->hasRenderers() && !sdl->presentRenderers())
+						throw ErrorMsg{ -1, SDL_EVENT_USER_UPDATE, "sdl->presentRenderers" };
+
+					/* It's better to stay on a somewhat fixed timeline and avoid burst-rendering if we got stalled */
+					nextFrame += frameInterval;
+					if (nextFrame <= now)
+						nextFrame = now + frameInterval;
 				}
 			}
 		}

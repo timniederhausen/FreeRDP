@@ -1,0 +1,17 @@
+.SH "SDL SPECIFIC OPTIONS"
+.PP
+\fB+sdl\-allow\-screensaver\fR
+.RS 4
+Allow local screensaver to activate (default: off)
+.RE
+.PP
+\fB\-sdl\-connection\-dialog\fR
+.RS 4
+Show the connection dialog with progress and errors (default: on). Overrides \fISDL_ConnectionDialog\fR from the configuration file unless \fIallowCommandlineToOverride\fR is disabled.
+.RE
+.PP
+\fB/sdl\-max\-fps\fR:\fIfps\fR
+.RS 4
+Draw at most \fIfps\fR screen updates per second (1\-1000). Only local drawing is limited: input and window events are still handled immediately, network bandwidth and server load are unchanged (see \fB/frame\-ack\fR). 0 disables the limit (default: 0)
+.RE
+.

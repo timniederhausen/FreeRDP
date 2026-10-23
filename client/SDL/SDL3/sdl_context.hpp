@@ -185,6 +185,8 @@ class SdlContext
 
 	[[nodiscard]] static int argumentHandler(const COMMAND_LINE_ARGUMENT_A* arg, void* custom);
 
+	[[nodiscard]] Uint64 frameInterval() const;
+
 	[[nodiscard]] CriticalSection& lock();
 
 	[[nodiscard]] std::vector<rdpPointer*>& pointers();
@@ -332,6 +334,7 @@ class SdlContext
 	std::optional<bool> _connectionDialog;
 	std::optional<bool> _allowScreenSaver;
 	SdlOverlay _overlay{ this };
+	uint32_t _maxFps = 0;
 	std::vector<rdpPointer*> _valid_pointers;
 	bool _credentialsRead = false;
 	SdlWheelAxis _wheelX;

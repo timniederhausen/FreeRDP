@@ -19,6 +19,7 @@
 
 #include <algorithm>
 #include <array>
+#include <charconv>
 #include <cmath>
 #include <cfloat>
 #include <utility>
@@ -45,6 +46,8 @@
 static constexpr auto sdl_allow_screensaver = "sdl-allow-screensaver";
 static constexpr auto sdl_connection_dialog = "sdl-connection-dialog";
 static constexpr auto sdl_info = "sdl-info";
+static constexpr auto sdl_max_fps = "sdl-max-fps";
+static constexpr uint32_t sdl_max_fps_limit = 1000;
 
 SdlContext::SdlContext(rdpContext* context)
     : _context(context), _log(WLog_Get(CLIENT_TAG("SDL"))), _cursor(nullptr, sdl_Pointer_FreeCopy),
@@ -82,6 +85,10 @@ SdlContext::SdlContext(rdpContext* context)
 	                  nullptr,
 	                  "the stats and info overlay from the start (its hotkey SDL_Info, default "
 	                  "<modifier>+I, shows and hides it)" });
+	_args.push_back({ sdl_max_fps, COMMAND_LINE_VALUE_REQUIRED, "<fps>", nullptr, nullptr, -1,
+	                  nullptr,
+	                  "Draw at most <fps> screen updates per second (1-1000), 0 for no limit "
+	                  "(default)" });
 
 	/* Push a null element used as abort when iterating the array */
 	_args.push_back({ nullptr, 0, nullptr, nullptr, nullptr, -1, nullptr, nullptr });
@@ -1773,6 +1780,27 @@ size_t SdlContext::argsCount() const
 	return _args.size() - 1;
 }
 
+// cmdline.c's value_to_uint/value_to_int
+template <typename T>
+WINPR_ATTR_NODISCARD
+static bool value_to_int(const char* value, T& result, T min, T max)
+{
+	if (!value)
+		return false;
+
+	const char* end = value + strlen(value);
+	uint32_t val = 0;
+	const auto [ptr, ec] = std::from_chars(value, end, val);
+	if ((ec != std::errc()) || (ptr != end))
+		return false;
+
+	if ((val < min) || (val > max))
+		return false;
+
+	result = val;
+	return true;
+}
+
 int SdlContext::argumentHandler(const COMMAND_LINE_ARGUMENT_A* arg, void* custom)
 {
 	auto sdl = static_cast<SdlContext*>(custom);
@@ -1802,8 +1830,26 @@ int SdlContext::argumentHandler(const COMMAND_LINE_ARGUMENT_A* arg, void* custom
 			if (!sdl->_overlay.show(arg->Value != nullptr))
 				return -2;
 		}
+		else if (strcmp(arg->Name, sdl_max_fps) == 0)
+		{
+			if (!value_to_int(arg->Value, sdl->_maxFps, 0, sdl_max_fps_limit))
+			{
+				WLog_Print(sdl->getWLog(), WLOG_ERROR,
+				           "/%s expects frames per second from 0 (no limit) to %" PRIu32
+				           ", got '%s'",
+				           sdl_max_fps, sdl_max_fps_limit, arg->Value ? arg->Value : "");
+				return COMMAND_LINE_ERROR_UNEXPECTED_VALUE;
+			}
+		}
 	}
 	return 0;
+}
+
+Uint64 SdlContext::frameInterval() const
+{
+	if (_maxFps == 0)
+		return 0;
+	return static_cast<Uint64>(SDL_NS_PER_SECOND) / _maxFps;
 }
 
 CriticalSection& SdlContext::lock()
